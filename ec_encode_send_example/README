@@ -1,0 +1,50 @@
+DESCRIPTION
+===========
+
+Client and server side open multiple QPs to simulate multiple targets
+for data and code blocks. The encoding is performed on the client
+side. Data and code blocks are then sent to the server on dedicated
+QPs and are saved to different output files named as "dataXX..." and
+"codeXX...". Input file is first encoded and sent with HW offload API
+and then in SW with Jerasure library. Results are saved in files with
+"_hw" and "_sw" suffixes.
+
+
+BUILD
+=====
+
+Build with make:
+$ make
+
+Path to Jerasure library can be customized with JERASURE_INSTALL_DIR
+makefile variable:
+$ make JERASURE_INSTALL_DIR=/tmp/install
+
+
+RUN
+===
+
+Run the server:
+$ sudo ./ec_encode_send_example -d mlx5_0 -g 0
+
+Run the client:
+$ sudo ./ec_encode_send_example -d mlx5_0 -g 0 -f ec_encode_send_example.c 127.0.0.1
+
+Check that HW and SW encodings are the same:
+$ diff code04_sw code04_hw
+
+Run with --help option to see other parameters:
+$ ./ec_encode_send_example --help
+Usage:
+ ./ec_encode_send_example [options] start a server and wait for connection
+ ./ec_encode_send_example [options] <host> connect to server at <host>
+
+Options:
+ -p, --port <port>            listen on/connect to port <port> (default 18515)
+ -d, --ib-dev <dev>           use IB device <dev> (default first device found)
+ -i, --ib-port <port>         use port <port> of IB device (default 1)
+ -g, --gid_idx <git index>    gid index to be used in GRH (default not used)
+ -f, --input-file <path>      input file name
+ -b, --block-size <size>      size of data block (default 512)
+ -k, --data-devices <N>       number of data devices (default 3, max 16)
+ -m, --code-devices <N>       number of code devices (default 2, max 4)
