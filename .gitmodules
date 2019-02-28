@@ -1,0 +1,6 @@
+[submodule "gf-complete"]
+	path = gf-complete
+	url = http://lab.jerasure.org/jerasure/gf-complete.git
+[submodule "jerasure"]
+	path = jerasure
+	url = http://lab.jerasure.org/jerasure/jerasure.git
