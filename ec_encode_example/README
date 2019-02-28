@@ -1,0 +1,13 @@
+Requirments:
+gf-complete
+Jerasure
+
+Build:
+./build-ec-encode-example.sh
+
+Examples:
+ibv_ec_encoder -i mlx5_0 -k 2 -m 1 -w 4 -D /tmp/EcEncodeDecode_2_1 -s 1024 -v
+ibv_ec_decoder -i mlx5_0 -k 2 -m 1 -w 4 -D /tmp/EcEncodeDecode_2_1 -C /tmp/EcEncodeDecode_2_1.code.offload -s 1024 -E 1,0 -v
+ibv_ec_encoder_async -i mlx5_0 -k 2 -m 1 -w 4 -D /tmp/EcEncodeDecode_2_1 -s 1024 -l 16 -v
+ibv_ec_updater -i mlx5_0 -k 8 -m 2 -w 4 -D /tmp/EcUpdate_8_2 -C /tmp/EcUpdate_8_2.code.offload -s 1024 -u 0,0,0,1,0,0,0,1 -c 1,0 -v
+./run_ec_perf_encode.sh -d mlx5_0 -i ib0 -k 20 -m 9 -w 8 -r 60 -c 24 -b 1024 -q 1 -l 64 -a
