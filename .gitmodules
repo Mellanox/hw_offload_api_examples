@@ -4,3 +4,6 @@
 [submodule "jerasure"]
 	path = jerasure
 	url = http://lab.jerasure.org/jerasure/jerasure.git
+[submodule "crc32_offload_api_example"]
+	path = crc32_offload_api_example
+	url = https://github.com/Mellanox/crc32_offload_api_example.git
