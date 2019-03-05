@@ -74,6 +74,7 @@ struct inargs {
     char    *data_updates;
     char    *code_updates;
     int     in_memory;
+    int     threads;
 };
 
 extern struct sockaddr_storage ssin;

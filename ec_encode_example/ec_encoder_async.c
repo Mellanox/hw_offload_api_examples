@@ -31,6 +31,7 @@
  */
 
 #include "ec_common.h"
+#include <pthread.h>
 
 struct encoder_context {
     struct ibv_context      *context;
@@ -40,6 +41,14 @@ struct encoder_context {
     int                      outfd_sw;
     int                      outfd_off;
 };
+
+struct encoder_thread {
+    pthread_t                thread;
+    int                      index;
+    struct inargs            *in;
+};
+
+pthread_mutex_t ctx_lock;
 
 static void
 ec_done(struct ibv_exp_ec_comp *ib_comp)
@@ -75,9 +84,11 @@ close_io_files(struct encoder_context *ctx)
 }
 
 static int
-open_io_files(struct inargs *in, struct encoder_context *ctx)
+open_io_files(struct encoder_context *ctx, struct encoder_thread *thread)
 {
     char *outfile;
+    struct inargs *in = thread->in;
+    size_t max_filename;
     int err = 0;
 
     ctx->infd = open(in->datafile, O_RDONLY);
@@ -86,15 +97,15 @@ open_io_files(struct inargs *in, struct encoder_context *ctx)
         return -EIO;
     }
 
-    outfile = calloc(1, strlen(in->datafile) + strlen(".code.offload") + 1);
+    max_filename = strlen(in->datafile) + strlen(".code.offload") + 16;
+    outfile = calloc(1, max_filename);
     if (!outfile) {
         err_log("Failed to alloc outfile\n");
         err = -ENOMEM;
         goto close_infd;
     }
 
-    outfile = strcat(outfile, in->datafile);
-    outfile = strcat(outfile, ".code.offload");
+    snprintf(outfile, max_filename, "%s.code.offload.%d", in->datafile, thread->index);
     unlink(outfile);
     ctx->outfd_off = open(outfile, O_RDWR | O_CREAT, 0666);
     if (ctx->outfd_off < 0) {
@@ -103,17 +114,8 @@ open_io_files(struct inargs *in, struct encoder_context *ctx)
         err = -EIO;
         goto close_infd;
     }
-    free(outfile);
 
-    outfile = calloc(1, strlen(in->datafile) + strlen(".code.sw") + 1);
-    if (!outfile) {
-        err_log("Failed to alloc outfile\n");
-        err = -ENOMEM;
-        goto close_infd;
-    }
-
-    outfile = strcat(outfile, in->datafile);
-    outfile = strcat(outfile, ".code.sw");
+    snprintf(outfile, max_filename, "%s.code.sw.%d", in->datafile, thread->index);
     unlink(outfile);
     ctx->outfd_sw = open(outfile, O_RDWR | O_CREAT, 0666);
     if (ctx->outfd_sw < 0) {
@@ -133,9 +135,10 @@ close_infd:
 }
 
 static struct encoder_context *
-init_ctx(struct ibv_device *ib_dev, struct inargs *in)
+init_ctx(struct ibv_device *ib_dev, struct encoder_thread *thread)
 {
     struct encoder_context *ctx;
+    struct inargs *in = thread->in;
     int err, i;
 
     ctx = calloc(1, sizeof(*ctx));
@@ -170,7 +173,7 @@ init_ctx(struct ibv_device *ib_dev, struct inargs *in)
         ctx->ec_ctx->comp[i].comp.done = ec_done;
     }
 
-    err = open_io_files(in, ctx);
+    err = open_io_files(ctx, thread);
     if (err)
         goto free_ec;
 
@@ -217,6 +220,7 @@ usage(const char *argv0)
     printf("  -s, --frame_size=<size>     size of EC frame\n");
     printf("  -r, --duration=<duration>   duration in seconds\n");
     printf("  -l, --calcs=<num inflights> num inflights for async calculations\n");
+    printf("  -t, --threads=<num threads> number of parallel threads\n");
     printf("  -p, --polling               use polling mode\n");
     printf("  -d, --debug                 print debug messages\n");
     printf("  -v, --verbose               add verbosity\n");
@@ -237,6 +241,7 @@ process_inargs(int argc, char *argv[], struct inargs *in)
         { .name = "duration",      .has_arg = 1, .val = 'r' },
         { .name = "gf",            .has_arg = 1, .val = 'w' },
         { .name = "affinity",      .has_arg = 1, .val = 'f' },
+        { .name = "threads",       .has_arg = 1, .val = 't' },
         { .name = "polling",       .has_arg = 0, .val = 'p' },
         { .name = "debug",         .has_arg = 0, .val = 'd' },
         { .name = "verbose",       .has_arg = 0, .val = 'v' },
@@ -244,7 +249,7 @@ process_inargs(int argc, char *argv[], struct inargs *in)
         { 0 }
     };
 
-    err = common_process_inargs(argc, argv, "i:D:s:l:k:m:w:r:f:phdv",
+    err = common_process_inargs(argc, argv, "i:D:s:l:k:m:w:r:f:t:phdv",
                     long_options, in, usage);
     if (err)
         return err;
@@ -358,30 +363,73 @@ put_comp:
     return err;
 }
 
-int main(int argc, char *argv[])
+void * encoder_thread(void *arg)
 {
     struct encoder_context *ctx;
     struct ibv_device *device;
-    struct inargs in;
+    struct encoder_thread *thread = arg;
     int err;
+
+    device = find_device(thread->in->devname);
+    if (!device)
+        return NULL;
+
+    pthread_mutex_lock(&ctx_lock);
+    ctx = init_ctx(device, thread);
+    if (!ctx) {
+        pthread_mutex_unlock(&ctx_lock);
+        return NULL;
+    }
+    pthread_mutex_unlock(&ctx_lock);
+
+    err = encode_file(ctx);
+    if (err)
+        err_log("failed to encode file %s\n", thread->in->datafile);
+
+    close_ctx(ctx);
+    return NULL;
+}
+
+int main(int argc, char *argv[])
+{
+    struct inargs in;
+    struct encoder_thread *threads;
+    int err;
+    int i;
 
     err = process_inargs(argc, argv, &in);
     if (err)
         return err;
 
-    device = find_device(in.devname);
-    if (!device)
-        return -EINVAL;
+    if (0 != (err = pthread_mutex_init(&ctx_lock, NULL))) {
+        err_log("Failed to create mutex, errno %d\n", err);
+	return err;
+    }
 
-    ctx = init_ctx(device, &in);
-    if (!ctx)
-        return -ENOMEM;
+    threads = malloc(in.threads * sizeof(*threads));
+    if (!threads) {
+        err_log("Failed to allocate threads\n");
+	return -ENOMEM;
+    }
 
-    err = encode_file(ctx);
-    if (err)
-        err_log("failed to encode file %s\n", in.datafile);
+    for (i = 0; i < in.threads; ++i) {
+        threads[i].index = i;
+        threads[i].in = &in;
+        if (0 != (err = pthread_create(&threads[i].thread, NULL, encoder_thread, &threads[i]))) {
+		err_log("Failed to start thread, errno %d\n", err);
+		goto free_threads;
+	}
+    }
 
-    close_ctx(ctx);
+    for (i = 0; i < in.threads; ++i) {
+        if (0 != (err = pthread_join(threads[i].thread, NULL))) {
+		err_log("Failed to join thread, errno %d\n", err);
+		goto free_threads;
+	}
+    }
 
-    return 0;
+ free_threads:
+    free(threads);
+    pthread_mutex_destroy(&ctx_lock);
+    return err;
 }

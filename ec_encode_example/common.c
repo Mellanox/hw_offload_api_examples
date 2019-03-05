@@ -59,6 +59,7 @@ int common_process_inargs(int argc, char *argv[],
     in->sw = 0;
     in->polling = 0;
     in->in_memory = 0;
+    in->threads = 1;
 
     while (1) {
         int c, ret;
@@ -186,6 +187,14 @@ int common_process_inargs(int argc, char *argv[],
         case 'l':
             in->max_inflight_calcs = strtol(optarg, NULL, 0);
             if (in->max_inflight_calcs < 1) {
+                usage(argv[0]);
+                return -EINVAL;
+            }
+            break;
+
+        case 't':
+            in->threads = strtol(optarg, NULL, 0);
+            if (in->threads < 1) {
                 usage(argv[0]);
                 return -EINVAL;
             }
