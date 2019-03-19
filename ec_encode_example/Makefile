@@ -3,8 +3,8 @@ PREFIX = /usr
 sbindir = bin
 
 CC = gcc
-CFLAGS += -g -ggdb -Wall -W -D_GNU_SOURCE
-LDFLAGS = -Wl,-rpath,/usr/lib -libverbs -lgf_complete -lJerasure -lpthread -lrdmacm
+CFLAGS += -g -ggdb -Wall -W -D_GNU_SOURCE -pthread
+LDFLAGS = -Wl,-rpath,/usr/lib -libverbs -lgf_complete -lJerasure -lpthread -lrdmacm -pthread
 
 OBJECTS_LAT = ec_encoder_async.o ec_perf_async.o ec_perf_sync.o ec_encoder.o ec_decoder.o ec_updater.o ec_common.o common.o 
 TARGETS = ibv_ec_encoder_async ibv_ec_perf_async ibv_ec_perf_sync ibv_ec_encoder ibv_ec_decoder ibv_ec_updater 
