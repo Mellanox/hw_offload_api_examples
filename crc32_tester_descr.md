@@ -3,16 +3,14 @@ CRC32 and UMR example
 
 ## Overview
 
-This example demostrates how to use CRC32 offload and zero-copy in simple storage protocol. Network messages and persistent data are protected by CRC32 signature. Data coming from network should be segmented into stide repeated blocks and some metadata is added. 
+This example demostrates how to use CRC32 offload and zero-copy in simple storage protocol. Network messages and persistent data are protected by CRC32 signature. Data coming from network should be segmented into stide repeated blocks and metadata is added. 
 
 ### Terminology
 
-UMR is a mechanism to alter the address translation properties of MKeys by posting Work
-Requests on SQs.
+UMR is a mechanism to alter the address translation properties of MKeys by posting Work Requests on SQs.
 
-UMR argument can contain, in addition to the buffers description list (aka scatter/gather entries
-or KLM), control blocks that extend memory management flexibility beyond banal address translation. "Strided Repeated Block"  allows to interleave elements of multiple arrays into a single cohesive array with a single command. MThe device supports user-level memory registration - converting multiple chunks of pre-registered
-memory to a single virtually-contiguous address space that can subsequently be used as a single virtually-contiguous memory buffer.
+UMR can contain, in addition to the buffers description list (aka scatter/gather entries
+or KLM), control blocks that extend memory management flexibility beyond banal address translation. "Strided Repeated Block"  allows to interleave elements of multiple arrays into a single cohesive array with a single command. The device supports user-level memory registration - converting multiple chunks of pre-registered memory to a single virtually-contiguous address space that can subsequently be used as a single virtually-contiguous memory buffer.
 
 ### UMR Programming Model
 
