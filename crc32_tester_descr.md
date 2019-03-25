@@ -71,3 +71,21 @@ Field   | Size     | Description
 --------| ---------|-------------
 ID      | uint64_t | Unique ID of IO request
 Status  | uint8_t  | Status of the request
+
+### Server data format
+
+Server stores data in chunks of 4096 bytes.
+
+Field      | Size (Bytes)    | Description 
+-----------| ----------------|-------------
+Data       | 4048            | User data
+Meatadata  | 48              | Metadata
+
+#### Metadata:
+
+Field      | Size         | Description 
+-----------| -------------|-------------
+ID         | uint64_t     | ID of the block
+Reserved   | 36 Bytes     | Reseved
+Signature  | 4 Bytes      | CRC32 signature protecting Data and metadata fields except last 4 bytes
+
