@@ -3,7 +3,7 @@ CRC32 and UMR example
 
 ## Overview
 
-This example demostrates how to use CRC32 offload and zero-copy in simple storage protocol.
+This example demostrates how to use CRC32 offload and zero-copy in simple storage protocol. Network messages and persistent data are protected by CRC32 signature. Data coming from network should be segmented into stide repeated blocks and some metadata is added. 
 
 ### Terminology
 
@@ -11,7 +11,8 @@ UMR is a mechanism to alter the address translation properties of MKeys by posti
 Requests on SQs.
 
 UMR argument can contain, in addition to the buffers description list (aka scatter/gather entries
-or KLM), control blocks that extend memory management flexibility beyond banal address translation. "Strided Repeated Block"  allows to interleave elements of multiple arrays into a single cohesive array with a single command.
+or KLM), control blocks that extend memory management flexibility beyond banal address translation. "Strided Repeated Block"  allows to interleave elements of multiple arrays into a single cohesive array with a single command. MThe device supports user-level memory registration - converting multiple chunks of pre-registered
+memory to a single virtually-contiguous address space that can subsequently be used as a single virtually-contiguous memory buffer.
 
 ### UMR Programming Model
 
@@ -42,6 +43,12 @@ From network perspective, each IO request involves following operations:
 
 #### IO request
 
+```
+####################################################################
+# Header    #  Payload                                     # CRC32 #
+####################################################################
+```
+
 IO request includes:
 - Header
 - Payload
@@ -67,12 +74,30 @@ Signature  | uint32_t | CRC32 signature that protects user data
 
 #### IO responce
 
+```
+################
+# ID #  Statue #
+################
+```
+
 Field   | Size     | Description 
 --------| ---------|-------------
 ID      | uint64_t | Unique ID of IO request
 Status  | uint8_t  | Status of the request
 
-### Server data format
+### Data structure in server
+
+```
+#########################################################################
+# Data (4048)                                  # Metadata (46) #CRC32(4)#
+#########################################################################
+#########################################################################
+# Data (4048)                                  # Metadata (46) #CRC32(4)#
+#########################################################################
+#########################################################################
+# Data (4048)                                  # Metadata (46) #CRC32(4)#
+#########################################################################
+```
 
 Server stores data in chunks of 4096 bytes.
 
