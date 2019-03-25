@@ -40,12 +40,14 @@ From network perspective, each IO request involves following operations:
 
 ### Message format
 
+#### IO request
+
 IO request includes:
 - Header
 - Payload
 - Tail
 
-#### Header
+##### Header
 
 Field | Size     | Description 
 ------| ---------|-------------
@@ -53,13 +55,19 @@ ID    | uint64_t | Unique ID of IO request
 Size  | uint16_t | Size of user data
 Type  | uint8_t  | Type of the request: 0 - read, 1 - write
 
-#### Payload
+##### Payload
 
 Payload is array of bytes in lenght of Header.Size
 
-### Tail
+##### Tail
 
 Field      | Size     | Description 
 -----------| ---------|-------------
 Signature  | uint32_t | CRC32 signature that protects user data
 
+#### IO responce
+
+Field   | Size     | Description 
+--------| ---------|-------------
+ID      | uint64_t | Unique ID of IO request
+Status  | uint8_t  | Status of the request
