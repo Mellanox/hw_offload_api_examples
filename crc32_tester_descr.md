@@ -87,13 +87,13 @@ Status  | uint8_t  | Status of the request
 
 ```
 #########################################################################
-# Data (4048)                                  # Metadata (46) #CRC32(4)#
+# Data (4048)                                  # Metadata (44) #CRC32(4)#
 #########################################################################
 #########################################################################
-# Data (4048)                                  # Metadata (46) #CRC32(4)#
+# Data (4048)                                  # Metadata (44) #CRC32(4)#
 #########################################################################
 #########################################################################
-# Data (4048)                                  # Metadata (46) #CRC32(4)#
+# Data (4048)                                  # Metadata (44) #CRC32(4)#
 #########################################################################
 ```
 
@@ -109,6 +109,6 @@ Meatadata  | 48              | Metadata
 Field      | Size         | Description 
 -----------| -------------|-------------
 ID         | uint64_t     | ID of the block
-Reserved   | 36 Bytes     | Reseved
+Reserved   | 44 Bytes     | Reseved
 Signature  | 4 Bytes      | CRC32 signature protecting Data and metadata fields except last 4 bytes
 
