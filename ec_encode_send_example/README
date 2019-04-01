@@ -48,3 +48,7 @@ Options:
  -b, --block-size <size>      size of data block (default 512)
  -k, --data-devices <N>       number of data devices (default 3, max 16)
  -m, --code-devices <N>       number of code devices (default 2, max 4)
+
+Performance tester:
+$ sudo ./ec_encode_send_perf -d mlx5_0 -g 0
+$ sudo ./ec_encode_send_perf -d mlx5_0 -g 0 -t 10 127.0.0.1

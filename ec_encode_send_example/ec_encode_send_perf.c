@@ -7,6 +7,7 @@ struct config_t config = {
 	.ib_port	= 1,
 	.gid_idx	= -1,
 	.input_file_name = NULL,
+	.time		= 10,
 	.block_size	= 512,
 	.k		= 3,
 	.m		= 2,
@@ -15,60 +16,53 @@ struct config_t config = {
 };
 
 static int
-receive_file(struct resources *res, const char *file_suffix)
+receive_file(struct resources *res)
 {
-	FILE *fds[config.k + config.m];
 	int rc = 0;
 	int i;
-	uint32_t fsize;
-	uint32_t flen = 0;
 	uint32_t tmp;
+	size_t total_size = 0;
+	struct timeval tvalBefore, tvalAfter;
 
-	sock_sync_data(res->sock, sizeof(fsize), (char *)&tmp, (char *)&fsize);
-	fsize = ntohl(fsize);
+	sock_sync_data(res->sock, sizeof(config.time), (char *)&tmp, (char *)&config.time);
+	/* Add some time to test duration on server side */
+	config.time += 1;
 
-	memset(fds, 0, sizeof(fds));
-	for (i = 0; i < config.k + config.m; ++i) {
-		char fname[1024];
-		snprintf(fname, sizeof(fname), "%s%02d%s",
-			 (i < config.k) ? "data" : "code", i, file_suffix);
-		fds[i] = fopen(fname, "w");
-		if (!fds[i]) {
-			rc = 1;
-			goto receive_file_exit;
-		}
-	}
-
-	while (flen < fsize) {
+	gettimeofday(&tvalBefore, NULL);
+	gettimeofday(&tvalAfter, NULL);
+	while (tvalAfter.tv_sec - tvalBefore.tv_sec < (long)config.time) {
 		struct ec_block *ecb = &res->ec_blocks[0];
 		post_receive_block(res, ecb);
 		for (i = 0; i < config.k + config.m; ++i) {
 			struct ibv_wc wc;
 			rc = poll_completion(res, &wc);
 			if (rc) {
-				fprintf(stderr, "Failed to poll for completion %d\n", i);
-				goto receive_file_exit;
+				if (ETIMEDOUT != rc) {
+					fprintf(stderr, "Failed to poll for completion %d\n", i);
+					goto receive_file_exit;
+				} else {
+					rc = 0;
+					goto receive_file_done;
+				}
 			}
 		}
-		for (i = 0; i < config.k + config.m; ++i) {
-			size_t len;
-			len = fwrite(ecb->buf + i * config.block_size,
-				     1, config.block_size, fds[i]);
-			if (!len) {
-				fprintf(stderr, "Failed to read input file\n");
-				rc = 1;
-				goto receive_file_exit;
-			}
-		}
-		flen += config.block_size * config.k;
+		total_size += config.block_size * config.k;
+		gettimeofday(&tvalAfter, NULL);
 	}
 
- receive_file_exit:
-	for (i = 0; i < config.k + config.m; ++i) {
-		if (fds[i]) {
-			fclose(fds[i]);
-		}
+ receive_file_done:
+	if (sock_sync_data(res->sock, sizeof(tmp), (char *)&tmp, (char *)&tmp)) {
+		fprintf(stderr, "Failed to sync after completion\n");
+		rc = 1;
+		goto receive_file_exit;
 	}
+
+	fprintf(stdout, "Received %lu bytes in %lu seconds, bandwidth %lu MiB/s\n",
+		total_size,
+		tvalAfter.tv_sec - tvalBefore.tv_sec,
+		total_size / 1024 / 1024 / (tvalAfter.tv_sec - tvalBefore.tv_sec));
+
+ receive_file_exit:
 	return rc;
 }
 
@@ -76,11 +70,11 @@ int server(struct resources *res)
 {
 	int rc = 0;
 
-	rc = receive_file(res, "_hw");
+	rc = receive_file(res);
 	if (rc) {
 		goto err_exit;
 	}
-	rc = receive_file(res, "_sw");
+	rc = receive_file(res);
 	if (rc) {
 		goto err_exit;
 	}
@@ -92,36 +86,20 @@ static int
 encode_and_send_file(struct resources *res,
 		     int (*encode_fn)(struct resources *, struct ec_block *))
 {
-	FILE *fd = NULL;
 	int rc = 0;
-	uint32_t fsize;
 	uint32_t tmp;
+	size_t total_size = 0;
+	struct timeval tvalBefore, tvalAfter;
 
-	fd = fopen(config.input_file_name, "r");
-	if (!fd) {
-		rc = 1;
-		goto encode_and_send_file_exit;
-	}
+	sock_sync_data(res->sock, sizeof(config.time), (char *)&config.time, (char *)&tmp);
 
-	fseek(fd, 0, SEEK_END);
-	fsize = ftell(fd);
-	rewind(fd);
-	fsize = htonl(fsize);
-	sock_sync_data(res->sock, sizeof(fsize), (char *)&fsize, (char *)&tmp);
-
-	while (!feof(fd)) {
+	gettimeofday(&tvalBefore, NULL);
+	gettimeofday(&tvalAfter, NULL);
+	while (tvalAfter.tv_sec - tvalBefore.tv_sec < (long)config.time) {
 		int i;
 		struct ibv_wc wc;
-		size_t len = config.block_size * config.k;
 		struct ec_block *ecb = &res->ec_blocks[0];
 
-		memset(ecb->buf, 0, len);
-		len = fread(ecb->buf, 1, len, fd);
-		if (!len) {
-			fprintf(stderr, "Failed to read input file\n");
-			rc = 1;
-			goto encode_and_send_file_exit;
-		}
 		rc = encode_fn(res, ecb);
 		if (rc) {
 			goto encode_and_send_file_exit;
@@ -132,12 +110,21 @@ encode_and_send_file(struct resources *res,
 				goto encode_and_send_file_exit;
 			}
 		}
+		total_size += config.block_size * config.k;
+		gettimeofday(&tvalAfter, NULL);
 	}
 
- encode_and_send_file_exit:
-	if (fd) {
-		fclose(fd);
+	if (sock_sync_data(res->sock, sizeof(tmp), (char *)&tmp, (char *)&tmp)) {
+		fprintf(stderr, "Failed to sync after completion\n");
+		goto encode_and_send_file_exit;
 	}
+
+	fprintf(stdout, "Encoded and sent %lu bytes in %lu seconds, bandwidth %lu MiB/s\n",
+		total_size,
+		tvalAfter.tv_sec - tvalBefore.tv_sec,
+		total_size / 1024 / 1024 / (tvalAfter.tv_sec - tvalBefore.tv_sec));
+
+ encode_and_send_file_exit:
 	return rc;
 }
 
@@ -171,7 +158,7 @@ static void print_config(void)
 	if (config.gid_idx >= 0)
 		fprintf(stdout, " GID index : %u\n", config.gid_idx);
 
-	fprintf(stdout, " Input file name : %u\n", config.input_file_name);
+	fprintf(stdout, " Time : %u\n", config.time);
 	fprintf(stdout, " Block size : %u\n", config.block_size);
 	fprintf(stdout, " K : %u\n", config.k);
 	fprintf(stdout, " M : %u\n", config.m);
@@ -212,7 +199,7 @@ static void usage(const char *argv0)
 		" -g, --gid_idx <git index>    gid index to be used in GRH "
 		"(default not used)\n");
 	fprintf(stdout,
-		" -f, --input-file <path>      input file name\n");
+		" -t, --time <seconds>         test time\n");
 	fprintf(stdout,
 		" -b, --block-size <size>      size of data block (default 512)\n");
 	fprintf(stdout,
@@ -252,7 +239,7 @@ int main(int argc, char *argv[])
 			{ .name = "ib-dev",		.has_arg = 1, .val = 'd' },
 			{ .name = "ib-port",		.has_arg = 1, .val = 'i' },
 			{ .name = "gid-idx",		.has_arg = 1, .val = 'g' },
-			{ .name = "input-file",	.has_arg = 1, .val = 'f' },
+			{ .name = "time",		.has_arg = 1, .val = 't' },
 			{ .name = "block-size",	.has_arg = 1, .val = 'b' },
 			{ .name = "k",			.has_arg = 1, .val = 'k' },
 			{ .name = "m",			.has_arg = 1, .val = 'm' },
@@ -260,7 +247,7 @@ int main(int argc, char *argv[])
 			{ .name = NULL,		.has_arg = 0, .val = '\0' }
 		};
 
-		c = getopt_long(argc, argv, "p:d:i:g:f:b:k:m:h", long_options, NULL);
+		c = getopt_long(argc, argv, "p:d:i:g:t:b:k:m:h", long_options, NULL);
 		if (c == -1)
 			break;
 		switch (c) {
@@ -284,8 +271,12 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 			break;
-		case 'f':
-			config.input_file_name = strdup(optarg);
+		case 't':
+			config.time = strtoul(optarg, NULL, 0);
+			if (config.time < 0) {
+				usage(argv[0]);
+				return 1;
+			};
 			break;
 		case 'b':
 			config.block_size = strtoul(optarg, NULL, 0);
