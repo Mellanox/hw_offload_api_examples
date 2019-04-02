@@ -12,17 +12,17 @@ struct config_t config = {
 	.k		= 3,
 	.m		= 2,
 	.w		= 8,
-	.max_inflight_calcs = MAX_INFLIGHT_CALCS
+	.max_inflight_calcs = 1
 };
 
 static int
 receive_file(struct resources *res)
 {
 	int rc = 0;
-	int i;
 	uint32_t tmp;
 	size_t total_size = 0;
 	struct timeval tvalBefore, tvalAfter;
+	struct ec_block *ecb;
 
 	sock_sync_data(res->sock, sizeof(config.time), (char *)&tmp, (char *)&config.time);
 	/* Add some time to test duration on server side */
@@ -30,23 +30,28 @@ receive_file(struct resources *res)
 
 	gettimeofday(&tvalBefore, NULL);
 	gettimeofday(&tvalAfter, NULL);
-	while (tvalAfter.tv_sec - tvalBefore.tv_sec < (long)config.time) {
-		struct ec_block *ecb = &res->ec_blocks[0];
+
+	while (ecb = get_ec_block(res)) {
+		ecb->pending_comps = config.k + config.m;
 		post_receive_block(res, ecb);
-		for (i = 0; i < config.k + config.m; ++i) {
-			struct ibv_wc wc;
-			rc = poll_completion(res, &wc);
-			if (rc) {
-				if (ETIMEDOUT != rc) {
-					fprintf(stderr, "Failed to poll for completion %d\n", i);
-					goto receive_file_exit;
-				} else {
-					rc = 0;
-					goto receive_file_done;
-				}
-			}
+	}
+	while (tvalAfter.tv_sec - tvalBefore.tv_sec < (long)config.time) {
+		struct ibv_wc wc;
+		rc = poll_completions(res, &wc, 1);
+		if (rc < 0) {
+			fprintf(stderr, "Failed to poll for completion\n");
+			goto receive_file_exit;
+		} else if (rc == 0) {
+			rc = 0;
+			goto receive_file_done;
 		}
-		total_size += config.block_size * config.k;
+		rc = 0;
+		ecb = (struct ec_block *)wc.wr_id;
+		if (0 == --ecb->pending_comps) {
+			ecb->pending_comps = config.k + config.m;
+			post_receive_block(res, ecb);
+			total_size += config.block_size * config.k;
+		}
 		gettimeofday(&tvalAfter, NULL);
 	}
 
@@ -57,10 +62,10 @@ receive_file(struct resources *res)
 		goto receive_file_exit;
 	}
 
-	fprintf(stdout, "Received %lu bytes in %lu seconds, bandwidth %lu MiB/s\n",
+	fprintf(stdout, "Received %lu bytes in %lu seconds, bandwidth %.1f MiB/s\n",
 		total_size,
 		tvalAfter.tv_sec - tvalBefore.tv_sec,
-		total_size / 1024 / 1024 / (tvalAfter.tv_sec - tvalBefore.tv_sec));
+		(double)total_size / 1024 / 1024 / (tvalAfter.tv_sec - tvalBefore.tv_sec));
 
  receive_file_exit:
 	return rc;
@@ -90,6 +95,9 @@ encode_and_send_file(struct resources *res,
 	uint32_t tmp;
 	size_t total_size = 0;
 	struct timeval tvalBefore, tvalAfter;
+	struct ibv_wc wc[MAX_CQE];
+	uint64_t total_ecb_time_ns = 0;
+	uint64_t ecb_count = 0;
 
 	sock_sync_data(res->sock, sizeof(config.time), (char *)&config.time, (char *)&tmp);
 
@@ -97,20 +105,43 @@ encode_and_send_file(struct resources *res,
 	gettimeofday(&tvalAfter, NULL);
 	while (tvalAfter.tv_sec - tvalBefore.tv_sec < (long)config.time) {
 		int i;
-		struct ibv_wc wc;
-		struct ec_block *ecb = &res->ec_blocks[0];
+		struct ec_block *ecb;
+		int has_blocks;
 
-		rc = encode_fn(res, ecb);
-		if (rc) {
-			goto encode_and_send_file_exit;
-		}
-		for (i = 0; i < config.k + config.m; ++i) {
-			rc = poll_completion(res, &wc);
+		while (ecb = get_ec_block(res)) {
+			clock_gettime(CLOCK_MONOTONIC, &ecb->submit_time);
+			ecb->pending_comps = config.k + config.m;
+			rc = encode_fn(res, ecb);
 			if (rc) {
+				rc = 1;
 				goto encode_and_send_file_exit;
 			}
+			total_size += config.block_size * config.k;
 		}
-		total_size += config.block_size * config.k;
+		has_blocks = 0;
+		while (!has_blocks) {
+			rc = poll_completions(res, wc, MAX_CQE);
+			if (rc <= 0) {
+				goto encode_and_send_file_exit;
+			}
+			for (i = 0; i < rc; ++i) {
+				if (wc[i].status != 0) {
+					fprintf(stderr, "Got completion with error: %d\n", wc[i].status);
+					goto encode_and_send_file_exit;
+				}
+				ecb = (struct ec_block*)wc[i].wr_id;
+				if (0 == --ecb->pending_comps) {
+					struct timespec t;
+					clock_gettime(CLOCK_MONOTONIC, &t);
+					total_ecb_time_ns += (uint64_t) (t.tv_sec - ecb->submit_time.tv_sec) * 1000000000
+						+ (t.tv_nsec - ecb->submit_time.tv_nsec);
+					ecb_count++;
+					put_ec_block(res, ecb);
+					has_blocks++;
+				}
+			}
+			rc = 0;
+		}
 		gettimeofday(&tvalAfter, NULL);
 	}
 
@@ -119,10 +150,11 @@ encode_and_send_file(struct resources *res,
 		goto encode_and_send_file_exit;
 	}
 
-	fprintf(stdout, "Encoded and sent %lu bytes in %lu seconds, bandwidth %lu MiB/s\n",
+	fprintf(stdout, "Encoded and sent %lu bytes in %lu seconds, bandwidth %.1f MiB/s, time per block %.2f us\n",
 		total_size,
 		tvalAfter.tv_sec - tvalBefore.tv_sec,
-		total_size / 1024 / 1024 / (tvalAfter.tv_sec - tvalBefore.tv_sec));
+		(double)total_size / 1024 / 1024 / (tvalAfter.tv_sec - tvalBefore.tv_sec),
+		(double)total_ecb_time_ns / ecb_count);
 
  encode_and_send_file_exit:
 	return rc;
@@ -206,6 +238,9 @@ static void usage(const char *argv0)
 		" -k, --data-devices <N>       number of data devices (default 3, max 16)\n");
 	fprintf(stdout,
 		" -m, --code-devices <N>       number of code devices (default 2, max 4)\n");
+	fprintf(stdout,
+		" -l, --calcs <N>              max number of inflight calculations (default 1, max %d)\n",
+		MAX_INFLIGHT_CALCS);
 }
 
 /******************************************************************************
@@ -243,11 +278,12 @@ int main(int argc, char *argv[])
 			{ .name = "block-size",	.has_arg = 1, .val = 'b' },
 			{ .name = "k",			.has_arg = 1, .val = 'k' },
 			{ .name = "m",			.has_arg = 1, .val = 'm' },
+			{ .name = "l",			.has_arg = 1, .val = 'l' },
 			{ .name = "help",		.has_arg = 0, .val = 'h' },
 			{ .name = NULL,		.has_arg = 0, .val = '\0' }
 		};
 
-		c = getopt_long(argc, argv, "p:d:i:g:t:b:k:m:h", long_options, NULL);
+		c = getopt_long(argc, argv, "p:d:i:g:t:b:k:m:l:h", long_options, NULL);
 		if (c == -1)
 			break;
 		switch (c) {
@@ -291,6 +327,14 @@ int main(int argc, char *argv[])
 		case 'm':
 			config.m = strtoul(optarg, NULL, 0);
 			if ((config.m < 1) || (config.m > MAX_M)) {
+				usage(argv[0]);
+				return 1;
+			}
+			break;
+		case 'l':
+			config.max_inflight_calcs = strtoul(optarg, NULL, 0);
+			if ((config.max_inflight_calcs < 1) ||
+			    (config.max_inflight_calcs > MAX_INFLIGHT_CALCS)) {
 				usage(argv[0]);
 				return 1;
 			}

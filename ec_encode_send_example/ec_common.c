@@ -67,6 +67,9 @@ static int sock_connect(const char *servername, int port)
 				/* Server mode. Set up listening socket an accept a connection */
 				listenfd = sockfd;
 				sockfd = -1;
+				tmp = 1;
+				if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &tmp, sizeof(tmp)))
+					goto sock_connect_exit;
 				if (bind(listenfd, iterator->ai_addr, iterator->ai_addrlen))
 					goto sock_connect_exit;
 
@@ -140,26 +143,27 @@ int sock_sync_data(int sock, int xfer_size, char *local_data, char *remote_data)
 End of socket operations
 ******************************************************************************/
 
-/* poll_completion */
+/* poll_completions */
 /******************************************************************************
- * Function: poll_completion
+ * Function: poll_completions
  *
  * Input
  * res pointer to resources structure
+ * len maximum number of completions to return
  *
  * Output
- * wc completion
+ * wc completions array of size len
  *
  * Returns
- * 0 on success, 1 on failure
+ * number of completions on success, 0 on timeout, negative on failure
  *
- * Description
- * Poll the completion queue for a single event. This function will continue to
- * poll the queue until MAX_POLL_CQ_TIMEOUT milliseconds have passed.
+ * Description Poll the completion queue for events. This function
+ * will continue to poll the queue until MAX_POLL_CQ_TIMEOUT
+ * milliseconds have passed or at least one completion is ready.
  *
  ******************************************************************************/
 int
-poll_completion(struct resources *res, struct ibv_wc *wc)
+poll_completions(struct resources *res, struct ibv_wc *wc, size_t len)
 {
 	unsigned long start_time_msec;
 	unsigned long cur_time_msec;
@@ -170,7 +174,7 @@ poll_completion(struct resources *res, struct ibv_wc *wc)
 	gettimeofday(&cur_time, NULL);
 	start_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
 	do {
-		poll_result = ibv_poll_cq(res->cq, 1, wc);
+		poll_result = ibv_poll_cq(res->cq, len, wc);
 		gettimeofday(&cur_time, NULL);
 		cur_time_msec =
 			(cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
@@ -179,25 +183,17 @@ poll_completion(struct resources *res, struct ibv_wc *wc)
 	if (poll_result < 0) {
 		/* poll CQ failed */
 		fprintf(stderr, "poll CQ failed\n");
-		rc = 1;
+		rc = -1;
 	} else if (poll_result == 0) {
 		/* the CQ is empty */
 		fprintf(stderr,
 			"completion wasn't found in the CQ after timeout\n");
-		rc = ETIMEDOUT;
+		rc = 0;
 	} else {
-		/* CQE found */
-		/* fprintf(stdout, "completion was found in CQ with status 0x%x, opcode %u, qp_num 0x%x\n",
-		   wc->status, wc->opcode, wc->qp_num); */
-		/* check the completion status (here we don't care about the completion
-		 * opcode */
-		if (wc->status != IBV_WC_SUCCESS) {
-			fprintf(stderr,
-				"got bad completion with status: %s (0x%x), vendor syndrome: 0x%x\n",
-				ibv_wc_status_str(wc->status),
-				wc->status, wc->vendor_err);
-			rc = 1;
-		}
+		/* CQEs found */
+		/* fprintf(stdout, "%d completion was found in CQ with status 0x%x, opcode %u, qp_num 0x%x\n",
+		   poll_result, wc->status, wc->opcode, wc->qp_num); */
+		rc = poll_result;
 	}
 	return rc;
 }
@@ -213,8 +209,8 @@ create_qp(struct resources *res)
 	qp_init_attr.sq_sig_all = 0;
 	qp_init_attr.send_cq = res->cq;
 	qp_init_attr.recv_cq = res->cq;
-	qp_init_attr.cap.max_send_wr = config.max_inflight_calcs * 2;
-	qp_init_attr.cap.max_recv_wr = 1;
+	qp_init_attr.cap.max_send_wr = config.max_inflight_calcs;
+	qp_init_attr.cap.max_recv_wr = config.max_inflight_calcs;
 	qp_init_attr.cap.max_send_sge = 1;
 	qp_init_attr.cap.max_recv_sge = 1;
 	/* Extended attributes */
@@ -269,14 +265,17 @@ static int alloc_encode_matrix(int k, int m, int w, uint8_t **en_mat, int **enco
 static void destroy_ec_blocks(struct resources *res)
 {
 	int i;
-	for (i = 0; i < config.max_inflight_calcs; ++i) {
-		struct ec_block *ecb = &res->ec_blocks[i];
-		if (ecb->mr) {
-			ibv_dereg_mr(ecb->mr);
+	if (res->ec_blocks) {
+		for (i = 0; i < config.max_inflight_calcs; ++i) {
+			struct ec_block *ecb = &res->ec_blocks[i];
+			if (ecb->mr) {
+				ibv_dereg_mr(ecb->mr);
+			}
+			if (ecb->buf) {
+				free(ecb->buf);
+			}
 		}
-		if (ecb->buf) {
-			free(ecb->buf);
-		}
+		free(res->ec_blocks);
 	}
 }
 
@@ -286,6 +285,13 @@ allocate_ec_blocks(struct resources *res)
 	int i, j;
 	int rc = 0;
 
+	res->ec_blocks = calloc(config.max_inflight_calcs, sizeof(struct ec_block));
+	if (!res->ec_blocks) {
+		fprintf(stderr, "Failed to allocate EC blocks array\n");
+		rc = 1;
+		goto allocate_ec_blocks_exit;
+	}
+	SLIST_INIT(&res->free_ec_blocks);
 	for (i = 0; i < config.max_inflight_calcs; ++i) {
 		struct ec_block *ecb = &res->ec_blocks[i];
 
@@ -338,12 +344,27 @@ allocate_ec_blocks(struct resources *res)
 			rwr->num_sge = 1;
 			rwr->next = NULL;
 		}
+		put_ec_block(res, ecb);
 	}
  allocate_ec_blocks_exit:
 	if (rc) {
 		destroy_ec_blocks(res);
 	}
 	return rc;
+}
+
+struct ec_block *get_ec_block(struct resources *res)
+{
+	struct ec_block *ecb = SLIST_FIRST(&res->free_ec_blocks);
+	if (ecb) {
+		SLIST_REMOVE_HEAD(&res->free_ec_blocks, entry);
+	}
+	return ecb;
+}
+
+void put_ec_block(struct resources *res, struct ec_block *ec_block)
+{
+	SLIST_INSERT_HEAD(&res->free_ec_blocks, ec_block, entry);
 }
 
 static void
@@ -517,7 +538,7 @@ int resources_create(struct resources *res)
 		goto resources_create_exit;
 	}
 
-	cq_size = 16;
+	cq_size = MAX_CQE;
 	res->cq = ibv_create_cq(res->ib_ctx, cq_size, NULL, NULL, 0);
 	if (!res->cq) {
 		fprintf(stderr, "failed to create CQ with %u entries\n",

@@ -11,7 +11,7 @@ struct config_t config = {
 	.k		= 3,
 	.m		= 2,
 	.w		= 8,
-	.max_inflight_calcs = MAX_INFLIGHT_CALCS
+	.max_inflight_calcs = 1
 };
 
 static int
@@ -44,11 +44,12 @@ receive_file(struct resources *res, const char *file_suffix)
 		post_receive_block(res, ecb);
 		for (i = 0; i < config.k + config.m; ++i) {
 			struct ibv_wc wc;
-			rc = poll_completion(res, &wc);
-			if (rc) {
+			rc = poll_completions(res, &wc, 1);
+			if (rc <= 0) {
 				fprintf(stderr, "Failed to poll for completion %d\n", i);
 				goto receive_file_exit;
 			}
+			rc = 0;
 		}
 		for (i = 0; i < config.k + config.m; ++i) {
 			size_t len;
@@ -127,10 +128,11 @@ encode_and_send_file(struct resources *res,
 			goto encode_and_send_file_exit;
 		}
 		for (i = 0; i < config.k + config.m; ++i) {
-			rc = poll_completion(res, &wc);
-			if (rc) {
+			rc = poll_completions(res, &wc, 1);
+			if (rc <= 0) {
 				goto encode_and_send_file_exit;
 			}
+			rc = 0;
 		}
 	}
 

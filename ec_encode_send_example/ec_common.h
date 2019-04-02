@@ -16,14 +16,16 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/queue.h>
 #include <unistd.h>
 #include <jerasure.h>
 #include <jerasure/reed_sol.h>
-
+#include <time.h>
 
 
 /* poll CQ timeout in millisec (2 seconds) */
 #define MAX_POLL_CQ_TIMEOUT 2000
+#define MAX_CQE 64
 
 /* structure of test parameters */
 struct config_t {
@@ -51,7 +53,7 @@ struct cm_con_data_t {
 
 #define MAX_K 16
 #define MAX_M 4
-#define MAX_INFLIGHT_CALCS 1
+#define MAX_INFLIGHT_CALCS 1024
 struct ec_block {
 	uint8_t *buf;
 	struct ibv_mr *mr;
@@ -61,6 +63,9 @@ struct ec_block {
 	struct ibv_send_wr send_wrs[MAX_K + MAX_M];
 	struct ibv_recv_wr recv_wrs[MAX_K + MAX_M];
 	struct ibv_sge sges[MAX_K + MAX_M];
+	uint32_t pending_comps;
+	struct timespec submit_time;
+	SLIST_ENTRY(ec_block) entry;
 };
 
 /* structure of system resources */
@@ -79,16 +84,19 @@ struct resources {
 	struct ibv_exp_ec_calc *ec_calc;
 	uint8_t *ec_encode_mat;
 	int *jerasure_encode_mat;
-	struct ec_block ec_blocks[MAX_INFLIGHT_CALCS];
+	struct ec_block *ec_blocks;
+	SLIST_HEAD(, ec_block) free_ec_blocks;
 };
 
 int sock_sync_data(int sock, int xfer_size, char *local_data, char *remote_data);
-int poll_completion(struct resources *res, struct ibv_wc *wc);
+int poll_completions(struct resources *res, struct ibv_wc *wc, size_t len);
 int resources_create(struct resources *res);
 int resources_destroy(struct resources *res);
 int connect_qps(struct resources *res);
 int post_receive_block(struct resources *res, struct ec_block *ec_block);
 int encode_and_send_block(struct resources *res, struct ec_block *ec_block);
 int encode_and_send_block_sw(struct resources *res, struct ec_block *ec_block);
+struct ec_block *get_ec_block(struct resources *res);
+void put_ec_block(struct resources *res, struct ec_block *ec_block);
 
 #endif /* EC_COMMON_H */

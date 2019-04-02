@@ -34,7 +34,7 @@ echo "Building jerasure ..."
 (cd ../jerasure && autoreconf --force --install -I m4 && ./configure LDFLAGS="-L$prefix/lib" CPPFLAGS="-I$prefix/include" --prefix="$prefix" && make -j install)
 
 echo "Building erasure coding tester ..."
-make JERASURE_INSTALL_DIR="$prefix"
+make -B JERASURE_INSTALL_DIR="$prefix"
 
 echo ""
 echo ""
