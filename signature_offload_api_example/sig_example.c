@@ -1597,7 +1597,7 @@ static void usage(const char *argv0)
 	fprintf(stdout,
 		" -i, --ib-port <port>         use port <port> of IB device (default 1)\n");
 	fprintf(stdout,
-		" -g, --gid_idx <git index>    gid index to be used in GRH "
+		" -g, --gid-idx <gid index>    gid index to be used in GRH "
 		"(default not used)\n");
 	fprintf(stdout,
 		" -b, --block-size <size>      size of data block, only 512 and 4096 are supported (default 512)\n");
