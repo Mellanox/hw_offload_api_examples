@@ -1,0 +1,19 @@
+
+BUILD
+=====
+
+$ make
+cc    -c -o sig_example.o sig_example.c
+cc -libverbs -o ibv_sig_example sig_example.o
+
+
+Examples:
+
+# Run the server
+./ibv_sig_example -d mlx5_0 -i 1
+
+# Run the initiator
+./ibv_sig_example -d mlx5_0 -i 1 11.212.80.5
+
+
+# Run './ibv_sig_example --help' for more information.
