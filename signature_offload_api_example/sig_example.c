@@ -227,6 +227,7 @@ static int sock_connect(const char *servername, int port)
 	char service[6];
 	int sockfd = -1;
 	int listenfd = 0;
+	int enable_reuseaddr = 1;
 	int tmp;
 
 	struct addrinfo hints = { .ai_flags = AI_PASSIVE,
@@ -258,6 +259,10 @@ static int sock_connect(const char *servername, int port)
 				/* Server mode. Set up listening socket an accept a connection */
 				listenfd = sockfd;
 				sockfd = -1;
+
+				setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR,
+					   &enable_reuseaddr, sizeof(enable_reuseaddr));
+
 				if (bind(listenfd, iterator->ai_addr, iterator->ai_addrlen))
 					goto sock_connect_exit;
 
