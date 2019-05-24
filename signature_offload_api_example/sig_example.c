@@ -72,10 +72,10 @@ struct cm_con_data_t {
 } __attribute__((packed));
 
 enum msg_types {
-	MSG_TYPE_RDMA_READ_REQ = 0,
-	MSG_TYPE_RDMA_READ_REP,
-	MSG_TYPE_RDMA_WRITE_REQ,
-	MSG_TYPE_RDMA_WRITE_REP,
+	MSG_TYPE_WRITE_REQ = 0,
+	MSG_TYPE_WRITE_REP,
+	MSG_TYPE_READ_REQ,
+	MSG_TYPE_READ_REP,
 	MSG_TYPE_CLOSE_CONN,
 };
 
@@ -504,7 +504,7 @@ static int post_send_pipeline(struct resources *res, const struct msg_t *req)
 
 	msg = (struct msg_t *)res->send_buf;
 	memset(msg, 0, sizeof(*msg));
-	msg->type = MSG_TYPE_RDMA_WRITE_REP;
+	msg->type = MSG_TYPE_READ_REP;
 	msg->data.rep.status = htonl(MSG_REP_STATUS_OK);
 
 	send_sge.addr = (uintptr_t)res->send_mr->addr;
@@ -1408,8 +1408,8 @@ int send_repl(struct resources *res, uint8_t type, uint32_t status)
 }
 
 
-int handle_read_req(struct resources *res,
-		    const struct msg_t *req)
+int handle_write_req(struct resources *res,
+		     const struct msg_t *req)
 {
 	int rc = 0;
 
@@ -1437,13 +1437,13 @@ int handle_read_req(struct resources *res,
 	if (rc)
 		goto err_exit;
 
-	rc = send_repl(res, MSG_TYPE_RDMA_READ_REP, MSG_REP_STATUS_OK);
+	rc = send_repl(res, MSG_TYPE_WRITE_REP, MSG_REP_STATUS_OK);
 err_exit:
 	return rc;
 }
 
-int handle_write_req(struct resources *res,
-		     const struct msg_t *req)
+int handle_read_req(struct resources *res,
+		    const struct msg_t *req)
 {
 	int rc = 0;
 
@@ -1471,13 +1471,13 @@ int handle_write_req(struct resources *res,
 	if (rc)
 		goto err_exit;
 
-	rc = send_repl(res, MSG_TYPE_RDMA_WRITE_REP, MSG_REP_STATUS_OK);
+	rc = send_repl(res, MSG_TYPE_READ_REP, MSG_REP_STATUS_OK);
 err_exit:
 	return rc;
 }
 
-int handle_write_req_pipeline(struct resources *res,
-			      const struct msg_t *req)
+int handle_read_req_pipeline(struct resources *res,
+			     const struct msg_t *req)
 {
 	struct ibv_exp_wc *wc = &res->wc;
 	int rc = 0;
@@ -1501,7 +1501,7 @@ int handle_write_req_pipeline(struct resources *res,
 	if (wc->exp_wc_flags & IBV_EXP_WC_SIG_PIPELINE_CANCELED) {
 		fprintf(stderr, "A signature error has been detected\n");
 
-		rc = send_repl(res, MSG_TYPE_RDMA_WRITE_REP,
+		rc = send_repl(res, MSG_TYPE_READ_REP,
 			       MSG_REP_STATUS_FAIL);
 		if (rc)
 			goto err_exit;
@@ -1529,17 +1529,17 @@ int server(struct resources *res)
 			break;
 
 		switch (msg->type) {
-		case MSG_TYPE_RDMA_READ_REQ:
-			rc = handle_read_req(res, msg);
+		case MSG_TYPE_WRITE_REQ:
+			rc = handle_write_req(res, msg);
 			if (rc)
 				close_conn = 1;
 			break;
 
-		case MSG_TYPE_RDMA_WRITE_REQ:
+		case MSG_TYPE_READ_REQ:
 			if (config.pipeline)
-				rc = handle_write_req_pipeline(res, msg);
+				rc = handle_read_req_pipeline(res, msg);
 			else
-				rc = handle_write_req(res, msg);
+				rc = handle_read_req(res, msg);
 			if (rc)
 				close_conn = 1;
 			break;
@@ -1548,15 +1548,9 @@ int server(struct resources *res)
 			close_conn = 1;
 			break;
 
-		case MSG_TYPE_RDMA_READ_REP:
-		case MSG_TYPE_RDMA_WRITE_REP:
-			fprintf(stderr, "invalid message type 0x%x\n", msg->type);
-			rc = 1;
-			close_conn = 1;
-			break;
-
 		default:
-			fprintf(stderr, "unknown message type 0x%x\n", msg->type);
+			fprintf(stderr, "An invalid message was received: type 0x%x\n",
+				msg->type);
 			rc = 1;
 			close_conn = 1;
 		}
@@ -1574,15 +1568,17 @@ int client(struct resources *res)
 	struct msg_t *msg;
 	int i;
 
-	/* ============ RDMA READ ==========================  */
+	/* ============ WRITE OPERATION ==========================  */
 	rc = reg_sig_mr(res, SIG_MODE_INSERT);
 	if (rc)
 		goto err_exit;
 
 	msg = (struct msg_t *)res->send_buf;
-	msg->type = MSG_TYPE_RDMA_READ_REQ;
+	msg->type = MSG_TYPE_WRITE_REQ;
 	msg->data.req.addr = htonll((uintptr_t)res->sig_mr->addr);
 	msg->data.req.rkey = htonl(res->sig_mr->rkey);
+
+	fprintf(stdout, "Send write request\n");
 
 	rc = post_send(res, IBV_WR_SEND, NULL);
 	if (rc)
@@ -1597,12 +1593,16 @@ int client(struct resources *res)
 		goto err_exit;
 
 	msg = (struct msg_t *)res->recv_buf;
-	if (msg->type != MSG_TYPE_RDMA_READ_REP ||
-	    ntohl(msg->data.rep.status) != MSG_REP_STATUS_OK) {
-		fprintf(stderr, "invalid message: type 0x%x, status 0x%x\n",
-			msg->type, ntohl(msg->data.rep.status));
+	if (msg->type != MSG_TYPE_WRITE_REP) {
+		fprintf(stderr,
+			"An invalid reply message was received, type 0x%x",
+			msg->type);
 		goto err_exit;
 	}
+
+        fprintf(stdout, "WRITE_REPLY: status %s\n",
+                (ntohl(msg->data.rep.status) == MSG_REP_STATUS_OK) ? "OK"
+                                                                   : "FAIL");
 
 	rc = check_sig_mr(res->sig_mr);
 	if (rc)
@@ -1612,7 +1612,7 @@ int client(struct resources *res)
 	if (rc)
 		goto err_exit;
 
-	/* ============ RDMA WRITE ==========================  */
+	/* ============ READ OPERATION ==========================  */
 
 	rc = post_receive(res);
 	if (rc)
@@ -1623,7 +1623,7 @@ int client(struct resources *res)
 		goto err_exit;
 
 	msg = (struct msg_t *)res->send_buf;
-	msg->type = MSG_TYPE_RDMA_WRITE_REQ;
+	msg->type = MSG_TYPE_READ_REQ;
 	msg->data.req.addr = htonll((uintptr_t)res->sig_mr->addr);
 	msg->data.req.rkey = htonl(res->sig_mr->rkey);
 
@@ -1640,14 +1640,16 @@ int client(struct resources *res)
 		goto err_exit;
 
 	msg = (struct msg_t *)res->recv_buf;
-	if (msg->type != MSG_TYPE_RDMA_WRITE_REP) {
-		fprintf(stderr, "invalid message: type 0x%x\n",
-			msg->type, ntohl(msg->data.rep.status));
+	if (msg->type != MSG_TYPE_READ_REP) {
+		fprintf(stderr,
+			"An invalid reply message was received, type 0x%x",
+			msg->type);
 		goto err_exit;
 	}
 
-	fprintf(stdout, "command status: %s\n",
-		(ntohl(msg->data.rep.status) == MSG_REP_STATUS_OK) ? "OK" : "FAIL");
+        fprintf(stdout, "READ_REPLY: status %s\n",
+                (ntohl(msg->data.rep.status) == MSG_REP_STATUS_OK) ? "OK"
+                                                                   : "FAIL");
 
 	rc = check_sig_mr(res->sig_mr);
 
