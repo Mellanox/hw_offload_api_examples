@@ -973,7 +973,7 @@ static int resources_create(struct resources *res)
 	qp_init_attr.sq_sig_all = 0;
 	qp_init_attr.send_cq = res->cq;
 	qp_init_attr.recv_cq = res->cq;
-	qp_init_attr.cap.max_send_wr = 16;
+	qp_init_attr.cap.max_send_wr = 2;
 	qp_init_attr.cap.max_recv_wr = 1;
 	qp_init_attr.cap.max_send_sge = 1;
 	qp_init_attr.cap.max_recv_sge = 1;
@@ -983,11 +983,9 @@ static int resources_create(struct resources *res)
 	qp_init_attr.comp_mask = IBV_QP_INIT_ATTR_PD;
 	qp_init_attr.comp_mask |= IBV_EXP_QP_INIT_ATTR_CREATE_FLAGS;
 	qp_init_attr.exp_create_flags |= IBV_EXP_QP_CREATE_SIGNATURE_EN;
-	qp_init_attr.exp_create_flags |= IBV_EXP_QP_CREATE_UMR;
 	if (is_server() && config.pipeline)
 		qp_init_attr.exp_create_flags |= IBV_EXP_QP_CREATE_SIGNATURE_PIPELINE;
-	qp_init_attr.comp_mask |= IBV_EXP_QP_INIT_ATTR_MAX_INL_KLMS;
-	qp_init_attr.max_inl_send_klms = 3;
+
 	res->qp = ibv_exp_create_qp(res->ib_ctx, &qp_init_attr);
 	if (!res->qp) {
 		fprintf(stderr, "failed to create QP\n");
