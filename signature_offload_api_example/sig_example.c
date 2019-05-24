@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 /* poll CQ timeout in millisec (2 seconds) */
@@ -59,6 +60,8 @@ struct config_t {
 	int nb;
 	int interleave;
 	const struct signature_ops *sig;
+	int pipeline;
+	int corrupt_data;
 };
 
 /* structure to exchange data which is needed to connect the QPs */
@@ -105,6 +108,7 @@ struct resources {
 	struct ibv_pd *pd;
 	struct ibv_cq *cq;
 	struct ibv_qp *qp;
+	struct ibv_exp_wc wc;
 
 	struct ibv_mr *send_mr;	/* MR for send buffer */
 	struct ibv_mr *recv_mr;	/* MR for recv buffer */
@@ -165,7 +169,14 @@ struct config_t config = {
 	.nb		= 8,
 	.interleave	= 0,
 	.sig		= &sig_ops[SIG_TYPE_CRC32],
+	.pipeline	= 0,
+	.corrupt_data	= 0,
 };
+
+static inline int is_server()
+{
+	return config.server_name == NULL;
+}
 
 const struct signature_ops *parse_sig_type(const char *type)
 {
@@ -340,20 +351,25 @@ End of socket operations
  ******************************************************************************/
 static int poll_completion(struct resources *res)
 {
-	struct ibv_wc wc;
 	unsigned long start_time_msec;
 	unsigned long cur_time_msec;
 	struct timeval cur_time;
+	struct ibv_exp_wc *wc = &res->wc;
 	int poll_result;
 	int rc = 0;
+	struct ibv_async_event event;
+
 	/* poll the completion for a while before giving up of doing it .. */
 	gettimeofday(&cur_time, NULL);
 	start_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
 	do {
-		poll_result = ibv_poll_cq(res->cq, 1, &wc);
+		poll_result = ibv_exp_poll_cq(res->cq, 1, wc, sizeof(*wc));
 		gettimeofday(&cur_time, NULL);
 		cur_time_msec =
 			(cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
+
+		if (!ibv_get_async_event(res->ib_ctx, &event))
+			ibv_ack_async_event(&event);
 	} while ((poll_result == 0) &&
 		 ((cur_time_msec - start_time_msec) < MAX_POLL_CQ_TIMEOUT));
 	if (poll_result < 0) {
@@ -368,13 +384,13 @@ static int poll_completion(struct resources *res)
 	} else {
 		/* CQE found */
 		fprintf(stdout, "completion was found in CQ with status 0x%x, opcode %u\n",
-			wc.status, wc.opcode);
+			wc->status, wc->exp_opcode);
 		/* check the completion status (here we don't care about the completion
      * opcode */
-		if (wc.status != IBV_WC_SUCCESS) {
+		if (wc->status != IBV_WC_SUCCESS) {
 			fprintf(stderr,
 				"got bad completion with status: 0x%x, vendor syndrome: 0x%x\n",
-				wc.status, wc.vendor_err);
+				wc->status, wc->vendor_err);
 			rc = 1;
 		}
 	}
@@ -448,6 +464,61 @@ static int post_send(struct resources *res, int opcode, const struct msg_t *req)
 			break;
 		}
 	}
+	return rc;
+}
+
+static int post_send_pipeline(struct resources *res, const struct msg_t *req)
+{
+	struct ibv_exp_send_wr rdma_wr = {};
+	struct ibv_exp_send_wr send_wr = {};
+	struct ibv_sge rdma_sge;
+	struct ibv_sge send_sge;
+	struct ibv_exp_send_wr *bad_wr = NULL;
+	struct msg_t *msg;
+	int rc;
+
+	if (config.corrupt_data) {
+		res->data_buf[0] = 'e';
+		res->data_buf[1] = 'r';
+		res->data_buf[2] = 'r';
+		res->data_buf[3] = 'o';
+		res->data_buf[3] = 'r';
+	}
+
+	rdma_sge.addr = (uintptr_t)res->sig_mr->addr;
+	/* length is calculated according to wire domain */
+	rdma_sge.length = (config.block_size + config.sig->pi_size) * config.nb;
+	rdma_sge.lkey = res->sig_mr->lkey;
+
+	rdma_wr.next = &send_wr;
+	rdma_wr.sg_list = &rdma_sge;
+	rdma_wr.num_sge = 1;
+	rdma_wr.exp_opcode = IBV_EXP_WR_RDMA_WRITE;
+	rdma_wr.wr.rdma.remote_addr = ntohll(req->data.req.addr);
+	rdma_wr.wr.rdma.rkey = ntohl(req->data.req.rkey);
+
+	msg = (struct msg_t *)res->send_buf;
+	memset(msg, 0, sizeof(*msg));
+	msg->type = MSG_TYPE_RDMA_WRITE_REP;
+	msg->data.rep.status = htonl(MSG_REP_STATUS_OK);
+
+	send_sge.addr = (uintptr_t)res->send_mr->addr;
+	send_sge.length = MSG_SIZE;
+	send_sge.lkey = res->send_mr->lkey;
+
+	send_wr.next = NULL;
+	send_wr.sg_list = &send_sge;
+	send_wr.num_sge = 1;
+	send_wr.exp_opcode = IBV_EXP_WR_SEND;
+	send_wr.exp_send_flags = IBV_EXP_SEND_SIGNALED;
+	send_wr.exp_send_flags |= IBV_EXP_SEND_SIG_PIPELINED;
+
+	rc = ibv_exp_post_send(res->qp, &rdma_wr, &bad_wr);
+	if (rc)
+		fprintf(stderr, "failed to post pipelined WRs\n");
+	else
+		fprintf(stdout, "Post pipelined WRs\n");
+
 	return rc;
 }
 
@@ -712,6 +783,19 @@ int alloc_and_register_buffer(struct ibv_pd *pd,
 	return 0;
 }
 
+int set_nonblock_async_event_fd(struct ibv_context *ctx)
+{
+	int flags;
+	int rc;
+
+	flags = fcntl(ctx->async_fd, F_GETFL);
+	rc = fcntl(ctx->async_fd, F_SETFL, flags | O_NONBLOCK);
+
+	if (rc)
+		fprintf(stderr, "failed to change file  descriptor of async event queue\n");
+
+	return rc;
+}
 /******************************************************************************
  * Function: resources_create
  *
@@ -815,6 +899,10 @@ static int resources_create(struct resources *res)
 	dev_list = NULL;
 	ib_dev = NULL;
 
+	if (set_nonblock_async_event_fd(res->ib_ctx)) {
+		rc = 1;
+		goto resources_create_exit;
+	}
 	/* query port properties */
 	if (ibv_query_port(res->ib_ctx, config.ib_port, &res->port_attr)) {
 		fprintf(stderr, "ibv_query_port on port %u failed\n",
@@ -891,6 +979,8 @@ static int resources_create(struct resources *res)
 	qp_init_attr.comp_mask |= IBV_EXP_QP_INIT_ATTR_CREATE_FLAGS;
 	qp_init_attr.exp_create_flags |= IBV_EXP_QP_CREATE_SIGNATURE_EN;
 	qp_init_attr.exp_create_flags |= IBV_EXP_QP_CREATE_UMR;
+	if (is_server() && config.pipeline)
+		qp_init_attr.exp_create_flags |= IBV_EXP_QP_CREATE_SIGNATURE_PIPELINE;
 	qp_init_attr.comp_mask |= IBV_EXP_QP_INIT_ATTR_MAX_INL_KLMS;
 	qp_init_attr.max_inl_send_klms = 3;
 	res->qp = ibv_exp_create_qp(res->ib_ctx, &qp_init_attr);
@@ -1318,7 +1408,7 @@ int handle_read_req(struct resources *res,
 {
 	int rc = 0;
 
-	rc = reg_sig_mr(res, SIG_MODE_STRIP);
+	rc = reg_sig_mr(res, SIG_MODE_CHECK);
 	if (rc)
 		goto err_exit;
 
@@ -1352,7 +1442,7 @@ int handle_write_req(struct resources *res,
 {
 	int rc = 0;
 
-	rc = reg_sig_mr(res, SIG_MODE_STRIP);
+	rc = reg_sig_mr(res, SIG_MODE_CHECK);
 	if (rc)
 		goto err_exit;
 
@@ -1381,6 +1471,47 @@ err_exit:
 	return rc;
 }
 
+int handle_write_req_pipeline(struct resources *res,
+			      const struct msg_t *req)
+{
+	struct ibv_exp_wc *wc = &res->wc;
+	int rc = 0;
+
+	rc = post_receive(res);
+	if (rc)
+		goto err_exit;
+
+	rc = reg_sig_mr(res, SIG_MODE_CHECK);
+	if (rc)
+		goto err_exit;
+
+	rc = post_send_pipeline(res, req);
+	if (rc)
+		goto err_exit;
+
+	rc = poll_completion(res);
+	if (rc)
+		goto err_exit;
+
+	if (wc->exp_wc_flags & IBV_EXP_WC_SIG_PIPELINE_CANCELED) {
+		fprintf(stderr, "A signature error has been detected\n");
+
+		rc = send_repl(res, MSG_TYPE_RDMA_WRITE_REP,
+			       MSG_REP_STATUS_FAIL);
+		if (rc)
+			goto err_exit;
+	}
+
+	rc = check_sig_mr(res->sig_mr);
+	if (rc && !config.corrupt_data)
+		goto err_exit;
+
+	rc = inv_sig_mr(res);
+
+err_exit:
+	return rc;
+}
+
 int server(struct resources *res)
 {
 	int rc = 0;
@@ -1400,7 +1531,10 @@ int server(struct resources *res)
 			break;
 
 		case MSG_TYPE_RDMA_WRITE_REQ:
-			rc = handle_write_req(res, msg);
+			if (config.pipeline)
+				rc = handle_write_req_pipeline(res, msg);
+			else
+				rc = handle_write_req(res, msg);
 			if (rc)
 				close_conn = 1;
 			break;
@@ -1501,16 +1635,16 @@ int client(struct resources *res)
 		goto err_exit;
 
 	msg = (struct msg_t *)res->recv_buf;
-	if (msg->type != MSG_TYPE_RDMA_WRITE_REP ||
-	    ntohl(msg->data.rep.status) != MSG_REP_STATUS_OK) {
-		fprintf(stderr, "invalid message: type 0x%x, status 0x%x\n",
+	if (msg->type != MSG_TYPE_RDMA_WRITE_REP) {
+		fprintf(stderr, "invalid message: type 0x%x\n",
 			msg->type, ntohl(msg->data.rep.status));
 		goto err_exit;
 	}
 
+	fprintf(stdout, "command status: %s\n",
+		(ntohl(msg->data.rep.status) == MSG_REP_STATUS_OK) ? "OK" : "FAIL");
+
 	rc = check_sig_mr(res->sig_mr);
-	if (rc)
-		goto err_exit;
 
 	fprintf(stdout, "Dump PI:\n");
 	for (i = 0; i < config.nb; i++) {
@@ -1562,6 +1696,8 @@ static void print_config(void)
 	fprintf(stdout, " Number of blocks : %u\n", config.nb);
 	fprintf(stdout, " Interleave : %u\n", config.interleave);
 	fprintf(stdout, " Signature type : %s\n", config.sig->name);
+	fprintf(stdout, " Pipeline : %d\n", config.pipeline);
+	fprintf(stdout, " Corrupt data : %d\n", config.corrupt_data);
 	fprintf(stdout,
 		" ------------------------------------------------\n\n");
 }
@@ -1607,6 +1743,10 @@ static void usage(const char *argv0)
 		" -o, --interleave             Data blocks and protection blocks are interleaved in the same buf\n");
 	fprintf(stdout,
 		" -s, --sig-type <type>        Supported signature types: crc32, t10dif (default crc32)\n");
+	fprintf(stdout,
+		" -l, --pipeline               Enable pipeline\n");
+	fprintf(stdout,
+		" -c, --corrupt-data           Corrupt data for READ read operation\n");
 }
 
 /******************************************************************************
@@ -1635,19 +1775,21 @@ int main(int argc, char *argv[])
 	while (1) {
 		int c;
 		static struct option long_options[] = {
-			{ .name = "help",	.has_arg = 0, .val = 'h' },
-			{ .name = "port",	.has_arg = 1, .val = 'p' },
-			{ .name = "ib-dev",	.has_arg = 1, .val = 'd' },
-			{ .name = "ib-port",	.has_arg = 1, .val = 'i' },
-			{ .name = "gid-idx",	.has_arg = 1, .val = 'g' },
-			{ .name = "block-size",	.has_arg = 1, .val = 'b' },
-			{ .name = "number-of-blocks", .has_arg = 1, .val = 'n' },
-			{ .name = "interleave",	.has_arg = 0, .val = 'o' },
-			{ .name = "sig-type",	.has_arg = 1, .val = 's' },
-			{ .name = NULL,		.has_arg = 0, .val = '\0' }
+			{ .name = "help",		.has_arg = 0, .val = 'h' },
+			{ .name = "port",		.has_arg = 1, .val = 'p' },
+			{ .name = "ib-dev",		.has_arg = 1, .val = 'd' },
+			{ .name = "ib-port",		.has_arg = 1, .val = 'i' },
+			{ .name = "gid-idx",		.has_arg = 1, .val = 'g' },
+			{ .name = "block-size",		.has_arg = 1, .val = 'b' },
+			{ .name = "number-of-blocks",	.has_arg = 1, .val = 'n' },
+			{ .name = "interleave",		.has_arg = 0, .val = 'o' },
+			{ .name = "sig-type",		.has_arg = 1, .val = 's' },
+			{ .name = "pipeline",		.has_arg = 0, .val = 'l' },
+			{ .name = "corrupt-data",	.has_arg = 0, .val = 'c' },
+			{ .name = NULL,			.has_arg = 0, .val = '\0' }
 		};
 
-		c = getopt_long(argc, argv, "hp:d:i:g:b:n:os:", long_options, NULL);
+		c = getopt_long(argc, argv, "hp:d:i:g:b:n:os:lc", long_options, NULL);
 		if (c == -1)
 			break;
 		switch (c) {
@@ -1698,6 +1840,12 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 			break;
+		case 'l':
+			config.pipeline = 1;
+			break;
+		case 'c':
+			config.corrupt_data = 1;
+			break;
 		default:
 			usage(argv[0]);
 			return 1;
@@ -1727,10 +1875,10 @@ int main(int argc, char *argv[])
 		goto main_exit;
 	}
 
-	if (config.server_name)
-		rc = client(&res);
-	else
+	if (is_server())
 		rc = server(&res);
+	else
+		rc = client(&res);
 
 main_exit:
 	if (resources_destroy(&res)) {
