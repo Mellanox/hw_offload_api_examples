@@ -226,26 +226,31 @@ int extract_erasures(char *failed_blocks, int k, int m,
     return 0;
 }
 
-uint8_t* alloc_decode_matrix(int *encode_matrix, int k, int w,
+uint8_t* alloc_decode_matrix(int *encode_matrix, int k, int m, int w,
                              int *erasures_arr, int *survived_arr)
 {
     int *dec_mat;
     uint8_t *dematrix;
-    int i, j, l = 0, m = 0;
+    int i, j, l = 0, e = 0;
     int err;
 
-    for (i = 0; i < k; i++) {
+    for (i = 0; i < k + m; i++) {
         if (erasures_arr[i])
-            m++;
+            e++;
     }
 
-    dematrix = calloc(m * k, 1);
+    dematrix = calloc(e * k, 1);
     if (!dematrix) {
         err_log("Failed to allocate decode matrix\n");
         return NULL;
     }
 
-    dec_mat = calloc(k * k, sizeof(int));
+    /* Decoding matrix created by Jerasure does not contain rows for
+     * coding elements. We allocate fake zeroed rows for coding blocks
+     * to keep correct offload matrix dimensions. Coding blocks will
+     * not be decoded correctly but we are only interested in data.
+     */
+    dec_mat = calloc(k * (k + m), sizeof(int));
     if (!dec_mat) {
         err_log("Failed to allocate dec_mat\n");
         goto err_demat;
@@ -259,10 +264,15 @@ uint8_t* alloc_decode_matrix(int *encode_matrix, int k, int w,
         goto err_decmat;
     }
 
-    for (i = 0; i < k; i++) {
+    /* Jerasure created k*k decoding matrix. We allocated additional m
+     * zeroed rows for coding elements. For offload we only need rows
+     * that decode erased blocks. Offload matrix is also
+     * transposed. Final offload matrix dimension is k*e.
+     */
+    for (i = 0; i < k + m; i++) {
         if (erasures_arr[i]) {
             for (j = 0; j < k; j++)
-                dematrix[j*m+l] = (uint8_t)dec_mat[i*k+j];
+                dematrix[j*e+l] = (uint8_t)dec_mat[i*k+j];
             l++;
         }
     }
@@ -847,7 +857,7 @@ alloc_ec_ctx(struct ibv_pd *pd, int frame_size,
             goto free_erasures;
 
         ctx->de_mat = alloc_decode_matrix(ctx->encode_matrix,
-                                          k, w,
+                                          k, m, w,
                                           ctx->erasures_arr,
                                           ctx->survived_arr);
         if (!ctx->de_mat)

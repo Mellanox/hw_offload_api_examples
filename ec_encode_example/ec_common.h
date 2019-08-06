@@ -126,7 +126,7 @@ int extract_erasures(char *failed_blocks, int k, int m,
                      int *erasures_arr, uint8_t *erasures,
                      int *survived_arr, uint8_t *survived);
 void free_decode_matrix(struct ec_context *ctx);
-uint8_t* alloc_decode_matrix(int *encode_matrix, int k, int w, int *erasures_arr, int *survived_arr);
+uint8_t* alloc_decode_matrix(int *encode_matrix, int k, int m, int w, int *erasures_arr, int *survived_arr);
 struct async_ec_context * alloc_async_ec_ctx(struct ibv_pd *pd, int frame_size,
                                  int k, int m, int w, int affinity,
                                  int max_inflight_calcs,
