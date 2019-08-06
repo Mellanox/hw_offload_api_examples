@@ -51,6 +51,7 @@ int common_process_inargs(int argc, char *argv[],
     in->k = 10;
     in->m = 4;
     in->w = 4;
+    in->failed_blocks = NULL;
     in->data_updates = NULL;
     in->code_updates = NULL;
     in->unit = "MBps";

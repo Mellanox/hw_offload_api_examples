@@ -225,17 +225,25 @@ process_inargs(int argc, char *argv[], struct inargs *in)
         return -EINVAL;
     }
 
+    if (in->failed_blocks == NULL) {
+        fprintf(stderr, "No erasures was given\n");
+        return -EINVAL;
+    }
+
     return 0;
 }
 
 static void
-zero_erasures(struct ec_context *ctx, void *buf)
+zero_erasures(struct ec_context *ctx, void *data_buf, void *code_buf)
 {
     int i;
 
     for (i = 0; i < ctx->attr.k; i++)
         if (ctx->erasures[i])
-            memset(buf + i * ctx->block_size, 0, ctx->block_size);
+            memset(data_buf + i * ctx->block_size, 0, ctx->block_size);
+    for (i = 0; i < ctx->attr.m; i++)
+        if (ctx->erasures[i + ctx->attr.k])
+            memset(code_buf + i * ctx->block_size, 0, ctx->block_size);
 }
 
 static int
@@ -251,12 +259,12 @@ decode_file(struct decoder_context *ctx)
         if (dbytes <= 0)
             break;
 
-        zero_erasures(ec_ctx, ec_ctx->data.buf);
-
         cbytes = read(ctx->codefd, ec_ctx->code.buf,
                   ec_ctx->block_size * ec_ctx->attr.m);
         if (cbytes <= 0)
             break;
+
+        zero_erasures(ec_ctx, ec_ctx->data.buf, ec_ctx->code.buf);
 
         err = ibv_exp_ec_decode_sync(ec_ctx->calc, &ec_ctx->mem,
                                      ec_ctx->erasures, ec_ctx->de_mat);

@@ -127,6 +127,8 @@ int extract_bitmap(char *src, uint8_t *dst, int size)
 
 int alloc_erasures(struct ec_context *ctx)
 {
+    int i;
+
     ctx->erasures_arr = calloc(ctx->attr.k + ctx->attr.m, sizeof(int));
     if (!ctx->erasures_arr) {
         err_log("failed to allocated erasures_arr buffer\n");
@@ -149,6 +151,12 @@ int alloc_erasures(struct ec_context *ctx)
     if (!ctx->survived) {
         err_log("failed to allocated survived buffer\n");
         goto err_survived_arr;
+    }
+
+    /* All survived by default */
+    for (i = 0; i < ctx->attr.k + ctx->attr.m; ++i) {
+        ctx->survived_arr[i] = 1;
+        ctx->survived[i] = 1;
     }
 
     return 0;
@@ -180,12 +188,14 @@ int extract_erasures(char *failed_blocks, int k, int m,
 
     pt = strtok (failed_blocks, ",");
     while (pt != NULL) {
-        if (i >= k) {
+        if (i >= k + m) {
             err_log("too many data nodes blocks given %d\n", i);
             return -EINVAL;
         }
 
         if (pt[0] == '1') {
+            survived_arr[i] = 0;
+            survived[i] = 0;
             erasures_arr[i] = 1;
             erasures[i] = 1;
             if (++tot > m) {
@@ -193,30 +203,25 @@ int extract_erasures(char *failed_blocks, int k, int m,
                 return -EINVAL;
 
             }
-        } else {
-            survived_arr[i] = 1;
-            survived[i] = 1;
         }
         pt = strtok (NULL, ",");
         i++;
     }
 
-    for (i = k; i < k + m; i++) {
-        survived_arr[i] = 1;
-        survived[i]= 1;
+    if (tot == 0) {
+        err_log("No erasures specified\n");
+        return -EINVAL;
     }
 
-    info_log("erasures: ");
-    for (i = 0; i < k; i++) {
-        info_log("[%d]: Jerasure=%d Verbs=%u ", i, erasures_arr[i], erasures[i]);
-    }
-
-    info_log("\nsurvived: ");
+    info_log("erasures:\n");
     for (i = 0; i < k + m; i++) {
-        info_log("[%d]: Jerasure=%d Verbs=%u ", i, survived_arr[i], survived[i]);
+        info_log("[%d]: Jerasure=%d Verbs=%u\n", i, erasures_arr[i], erasures[i]);
     }
 
-    info_log("\n");
+    info_log("survived:\n");
+    for (i = 0; i < k + m; i++) {
+        info_log("[%d]: Jerasure=%d Verbs=%u\n", i, survived_arr[i], survived[i]);
+    }
 
     return 0;
 }
