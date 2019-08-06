@@ -264,6 +264,9 @@ uint8_t* alloc_decode_matrix(int *encode_matrix, int k, int m, int w,
         goto err_decmat;
     }
 
+    info_log("dec_mat:\n");
+    print_matrix_int(dec_mat, k + m, k);
+
     /* Jerasure created k*k decoding matrix. We allocated additional m
      * zeroed rows for coding elements. For offload we only need rows
      * that decode erased blocks. Offload matrix is also
@@ -277,6 +280,8 @@ uint8_t* alloc_decode_matrix(int *encode_matrix, int k, int m, int w,
         }
     }
     free(dec_mat);
+
+    info_log("dematrix:\n");
     print_matrix_u8(dematrix, k, l);
 
     return dematrix;

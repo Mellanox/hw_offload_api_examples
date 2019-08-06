@@ -307,7 +307,7 @@ int main(int argc, char *argv[])
 
     err = decode_file(ctx);
     if (err)
-        fprintf(stderr, "failed to encode file %s\n", in.datafile);
+        fprintf(stderr, "failed to decode file %s\n", in.datafile);
 
     close_ctx(ctx);
 
