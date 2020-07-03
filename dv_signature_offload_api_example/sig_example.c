@@ -598,7 +598,7 @@ void dump_pi_crc32(void *pi)
 {
 	uint32_t crc = ntohl(*(uint32_t *)pi);
 
-	fprintf(stdout, "crc32 0x%lx\n", crc);
+	fprintf(stdout, "crc32 0x%x\n", crc);
 }
 
 struct t10dif_pi {
@@ -614,7 +614,7 @@ void dump_pi_t10dif(void *pi_ptr)
 
 	uint32_t crc = ntohl(*(uint32_t *)pi);
 
-	fprintf(stdout, "t10dif { guard 0x%x, application tag 0x%x, reference tag 0x%lx }\n",
+	fprintf(stdout, "t10dif { guard 0x%x, application tag 0x%x, reference tag 0x%x }\n",
 		ntohs(pi->guard),
 		ntohs(pi->app_tag),
 		ntohl(pi->ref_tag));
@@ -740,7 +740,7 @@ int reg_sig_mr(struct resources *res,
 		fprintf(stderr, "poll completion failed\n");
 	}
 
-	fprintf(stdout, "Signature MR was registered with addr=%p, lkey=0x%x, rkey=0x%x\n",
+	fprintf(stdout, "Signature MR was registered with addr=0x%x, lkey=0x%x, rkey=0x%x\n",
 		0, res->sig_mr->lkey, res->sig_mr->rkey);
 
 	return rc;
