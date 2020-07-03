@@ -1025,7 +1025,7 @@ static int resources_create(struct resources *res)
 	qp_attr.sq_sig_all = 0;
 	qp_attr.send_cq = res->cq;
 	qp_attr.recv_cq = res->cq;
-	qp_attr.cap.max_send_wr = 2;
+	qp_attr.cap.max_send_wr = 4;
 	qp_attr.cap.max_recv_wr = 1;
 	qp_attr.cap.max_send_sge = 1;
 	qp_attr.cap.max_recv_sge = 1;
