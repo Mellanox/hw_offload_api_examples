@@ -132,6 +132,7 @@ struct signature_ops {
 	size_t		pi_size;
 	void		(*set_sig_domain)(struct mlx5dv_sig_block_domain *, void *);
 	void		(*dump_pi)(void *pi);
+	uint8_t		check_mask;
 };
 
 enum signature_types {
@@ -152,12 +153,15 @@ const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
 		.pi_size	= 4,
 		.set_sig_domain	= set_sig_domain_crc32,
 		.dump_pi	= dump_pi_crc32,
+		.check_mask	= MLX5DV_SIG_CHECK_CRC32,
 	},
 	[SIG_TYPE_T10DIFF] = {
 		.name		= "t10dif",
 		.pi_size	= 8,
 		.set_sig_domain	= set_sig_domain_t10dif,
 		.dump_pi	= dump_pi_t10dif,
+		.check_mask	= MLX5DV_SIG_CHECK_T10DIF_GUARD |
+				  MLX5DV_SIG_CHECK_T10DIF_REFTAG,
 	},
 };
 
@@ -633,9 +637,6 @@ void set_sig_domain_t10dif(struct mlx5dv_sig_block_domain *domain, void *sig)
 		     MLX5DV_SIG_T10DIF_FLAG_APP_ESCAPE |
 		     MLX5DV_SIG_T10DIF_FLAG_REF_ESCAPE;
 	dif->apptag_check_mask = 0xffff;
-	dif->check_mask = MLX5DV_SIG_T10DIF_CHECK_GUARD |
-			  MLX5DV_SIG_T10DIF_CHECK_APPTAG |
-			  MLX5DV_SIG_T10DIF_CHECK_REFTAG;
 
 	memset(domain, 0, sizeof(*domain));
 	domain->sig.dif = dif;
@@ -712,6 +713,7 @@ int reg_sig_mr(struct resources *res,
 	struct mlx5dv_sig_block_attr sig_attr = {
 		.mkey = &mkey,
 		.wire = &wire,
+		.check_mask = config.sig->check_mask,
 	};
 	int rc;
 
