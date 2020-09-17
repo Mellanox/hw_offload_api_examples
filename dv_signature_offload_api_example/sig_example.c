@@ -1055,8 +1055,7 @@ static int resources_create(struct resources *res)
 	mkey_attr.pd = res->pd;
 	mkey_attr.max_entries = 1;
 	mkey_attr.create_flags = MLX5DV_MKEY_INIT_ATTR_FLAGS_INDIRECT |
-				 MLX5DV_MKEY_INIT_ATTR_FLAGS_BLOCK_SIGNATURE |
-				 MLX5DV_MKEY_INIT_ATTR_FLAGS_TRANSACTION_SIGNATURE;
+				 MLX5DV_MKEY_INIT_ATTR_FLAGS_BLOCK_SIGNATURE;
 
 	res->sig_mr = mlx5dv_create_mkey(&mkey_attr);
 	if (!res->sig_mr) {
