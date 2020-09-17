@@ -651,11 +651,9 @@ int configure_sig_mkey(struct resources *res,
 	struct ibv_qp_ex *qpx = ibv_qp_to_qp_ex(res->qp);
 	struct mlx5dv_qp_ex *dv_qp = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
 	struct mlx5dv_mkey *mkey = res->sig_mr;
-	struct mlx5dv_mkey_attr mkey_attr = {
-		.access_flags = IBV_ACCESS_LOCAL_WRITE |
+	uint32_t access_flags = IBV_ACCESS_LOCAL_WRITE |
 				IBV_ACCESS_REMOTE_READ |
-				IBV_ACCESS_REMOTE_WRITE,
-	};
+				IBV_ACCESS_REMOTE_WRITE;
 	struct ibv_sge sge;
 	struct mlx5dv_mr_interleaved mr_interleaved[2];
 
@@ -664,7 +662,7 @@ int configure_sig_mkey(struct resources *res,
 	qpx->wr_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
 
 	mlx5dv_wr_mkey_configure(dv_qp, mkey, 0);
-	mlx5dv_wr_mkey_set_basic_attr(dv_qp, &mkey_attr);
+	mlx5dv_wr_set_mkey_access_flags(dv_qp, access_flags);
 
 	if ((!res->pi_buf) ||
 	    (mode == SIG_MODE_INSERT) ||
