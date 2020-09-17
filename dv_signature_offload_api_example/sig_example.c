@@ -695,7 +695,7 @@ int configure_sig_mkey(struct resources *res,
 			sge.length = config.block_size * config.nb;
 		else
 			sge.length = res->data_mr->length;
-		mlx5dv_wr_mkey_set_layout_list(dv_qp, 1, &sge);
+		mlx5dv_wr_set_mkey_layout_list(dv_qp, 1, &sge);
 	} else {
 		/* data */
 		mr_interleaved[0].addr = (uintptr_t)res->data_mr->addr;
@@ -708,9 +708,9 @@ int configure_sig_mkey(struct resources *res,
 		mr_interleaved[1].bytes_skip = 0;
 		mr_interleaved[1].lkey = res->pi_mr->lkey;
 
-		mlx5dv_wr_mkey_set_layout_interleaved(dv_qp, config.nb, 2, mr_interleaved);
+		mlx5dv_wr_set_mkey_layout_interleaved(dv_qp, config.nb, 2, mr_interleaved);
 	}
-	mlx5dv_wr_mkey_set_sig_block(dv_qp, sig_attr);
+	mlx5dv_wr_set_mkey_sig_block(dv_qp, sig_attr);
 
 	return ibv_wr_complete(qpx);
 }
