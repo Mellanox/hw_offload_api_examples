@@ -64,6 +64,9 @@ struct config_t {
 	const struct signature_ops *sig;
 	int pipeline;
 	int corrupt_data;
+	int corrupt_app_tag;
+	int corrupt_ref_tag;
+	int corrupt_offset;
 };
 
 /* structure to exchange data which is needed to connect the QPs */
@@ -161,6 +164,7 @@ const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
 		.set_sig_domain	= set_sig_domain_t10dif,
 		.dump_pi	= dump_pi_t10dif,
 		.check_mask	= MLX5DV_SIG_CHECK_T10DIF_GUARD |
+				  MLX5DV_SIG_CHECK_T10DIF_APPTAG |
 				  MLX5DV_SIG_CHECK_T10DIF_REFTAG,
 	},
 };
@@ -177,6 +181,9 @@ struct config_t config = {
 	.sig		= &sig_ops[SIG_TYPE_CRC32],
 	.pipeline	= 0,
 	.corrupt_data	= 0,
+	.corrupt_offset	= -1,
+	.corrupt_app_tag	= 0,
+	.corrupt_ref_tag	= 0,
 };
 
 static inline int is_server()
@@ -1440,9 +1447,34 @@ int check_sig_mr(struct mlx5dv_mkey *mkey)
 		return rc;
 	}
 
-	rc = (err_info.err_type == MLX5DV_MKEY_NO_ERR) ? 0 : err_info.err_type;
-	fprintf(stdout, "mr status: %s\n",
-		(rc ? "SIG ERROR" : "OK"));
+	rc = err_info.err_type;
+	switch (rc) {
+	case MLX5DV_MKEY_NO_ERR:
+		break;
+	case MLX5DV_MKEY_SIG_BLOCK_BAD_REFTAG:
+		fprintf(stderr, "bad block reftag error has been detected\n");
+		break;
+	case MLX5DV_MKEY_SIG_BLOCK_BAD_APPTAG:
+		fprintf(stderr, "bad block apptag error has been detected\n");
+		break;
+	case MLX5DV_MKEY_SIG_BLOCK_BAD_GUARD:
+		fprintf(stderr, "bad block guard error has been detected\n");
+		break;
+	case MLX5DV_MKEY_SIG_TRANSACTION_BAD_GUARD:
+		fprintf(stderr, "bad transaction guard error has been detected\n");
+		break;
+	default:
+		fprintf(stderr, "Unknown error has been detected\n");
+		break;
+	}
+
+	if (rc)
+		fprintf(stderr, "mr status: %s(%d) expected_value %lu "
+				"actual_value %lu offset %lu\n",
+			"SIG ERROR", rc, err_info.err.sig.expected_value,
+			err_info.err.sig.actual_value, err_info.err.sig.offset);
+	else
+		fprintf(stdout, "mr status: OK\n");
 
 	return rc;
 }
@@ -1503,14 +1535,53 @@ err_exit:
 	return rc;
 }
 
+uint8_t *find_corrupt_pos(struct resources *res, int offset)
+{
+	uint8_t *pos;
+	int block_len = config.block_size + config.sig->pi_size;
+
+	if (offset >= block_len * config.nb)
+		return NULL;
+
+	if (config.interleave) {
+		pos = res->data_buf + offset;
+	} else {
+		if (offset % block_len < config.block_size) {
+			// corrupt in data
+			pos = res->data_buf +
+			      offset / block_len * config.block_size +
+			      offset % block_len;
+		} else {
+			// corrupt in protection information
+			pos = res->pi_buf +
+			      offset / block_len * config.sig->pi_size +
+			      (offset % block_len - config.block_size);
+		}
+	}
+	return pos;
+}
+
 int handle_read_req(struct resources *res,
 		    const struct msg_t *req)
 {
 	int rc = 0;
+	uint8_t *corrupt_pos;
 
 	rc = reg_sig_mr(res, SIG_MODE_CHECK);
 	if (rc)
 		goto err_exit;
+
+	if (config.corrupt_offset >= 0) {
+		corrupt_pos = find_corrupt_pos(res, config.corrupt_offset);
+		if (!corrupt_pos) {
+			fprintf(stderr,
+				"Warning: input offset is not correct\n");
+			rc = 1;
+			goto err_exit;
+		}
+		// corrupt the data in the position
+		*corrupt_pos = ~(*corrupt_pos);
+	}
 
 	rc = post_send(res, IBV_WR_RDMA_WRITE, req);
 	if (rc)
@@ -1769,6 +1840,9 @@ static void print_config(void)
 	fprintf(stdout, " Signature type : %s\n", config.sig->name);
 	fprintf(stdout, " Pipeline : %d\n", config.pipeline);
 	fprintf(stdout, " Corrupt data : %d\n", config.corrupt_data);
+	fprintf(stdout, " Corrupt app_tag : %d\n", config.corrupt_app_tag);
+	fprintf(stdout, " Corrupt ref_tag : %d\n", config.corrupt_ref_tag);
+	fprintf(stdout, " Corrupt offset : %d\n", config.corrupt_offset);
 	fprintf(stdout,
 		" ------------------------------------------------\n\n");
 }
@@ -1816,8 +1890,17 @@ static void usage(const char *argv0)
 		" -s, --sig-type <type>        Supported signature types: crc32, t10dif (default crc32)\n");
 	fprintf(stdout,
 		" -l, --pipeline               Enable pipeline\n");
-	fprintf(stdout,
-		" -c, --corrupt-data           Corrupt data for READ read operation\n");
+	fprintf(stdout, " -c, --corrupt-data           Corrupt data (i.e., "
+			"corrupt-offset = 0)  for READ read operation\n");
+	fprintf(stdout, " -a, --corrupt-app-tag        Corrupt apptag (i.e., "
+			"corrupt-offset = block-size + 2) for READ "
+			"read operation (only for t10dif)\n");
+	fprintf(stdout, " -r, --corrupt-ref-tag        Corrupt reftag (i.e., "
+			"corrupt-offset = block-size + 4) for READ "
+			"read operation (only for t10dif)\n");
+	fprintf(stdout, " -f, --corrupt-offset         Corrupt at specified "
+			"linear offset (view in the wire domain) for READ read "
+			"operation\n");
 }
 
 /******************************************************************************
@@ -1857,10 +1940,13 @@ int main(int argc, char *argv[])
 			{ .name = "sig-type",		.has_arg = 1, .val = 's' },
 			{ .name = "pipeline",		.has_arg = 0, .val = 'l' },
 			{ .name = "corrupt-data",	.has_arg = 0, .val = 'c' },
+			{ .name = "corrupt-app-tag",	.has_arg = 0, .val = 'a' },
+			{ .name = "corrupt-ref-tag",	.has_arg = 0, .val = 'r' },
+			{ .name = "corrupt-offset",	.has_arg = 1, .val = 'f' },
 			{ .name = NULL,			.has_arg = 0, .val = '\0' }
 		};
 
-		c = getopt_long(argc, argv, "hp:d:i:g:b:n:os:lc", long_options, NULL);
+		c = getopt_long(argc, argv, "hp:d:f:i:g:b:n:os:lcar", long_options, NULL);
 		if (c == -1)
 			break;
 		switch (c) {
@@ -1917,6 +2003,19 @@ int main(int argc, char *argv[])
 		case 'c':
 			config.corrupt_data = 1;
 			break;
+		case 'a':
+			config.corrupt_app_tag = 1;
+			break;
+		case 'r':
+			config.corrupt_ref_tag = 1;
+			break;
+		case 'f':
+			config.corrupt_offset = strtoul(optarg, NULL, 0);
+			if (config.corrupt_offset < 0) {
+				usage(argv[0]);
+				return 1;
+			}
+			break;
 		default:
 			usage(argv[0]);
 			return 1;
@@ -1929,6 +2028,21 @@ int main(int argc, char *argv[])
 	else if (optind < argc) {
 		usage(argv[0]);
 		return 1;
+	}
+
+	if ((config.corrupt_app_tag || config.corrupt_ref_tag) &&
+	    (strcmp("t10dif", config.sig->name))) {
+		usage(argv[0]);
+		return 1;
+	}
+
+	if (-1 == config.corrupt_offset) {
+		if (config.corrupt_ref_tag)
+			config.corrupt_offset = config.block_size + 4;
+		else if (config.corrupt_app_tag)
+			config.corrupt_offset = config.block_size + 2;
+		else if (config.corrupt_data)
+			config.corrupt_offset = 0;
 	}
 
 	print_config();
