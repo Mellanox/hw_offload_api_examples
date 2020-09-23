@@ -636,7 +636,6 @@ void set_sig_domain_t10dif(struct mlx5dv_sig_block_domain *domain, void *sig)
 	dif->flags = MLX5DV_SIG_T10DIF_FLAG_REF_REMAP |
 		     MLX5DV_SIG_T10DIF_FLAG_APP_ESCAPE |
 		     MLX5DV_SIG_T10DIF_FLAG_REF_ESCAPE;
-	dif->apptag_check_mask = 0xffff;
 
 	memset(domain, 0, sizeof(*domain));
 	domain->sig.dif = dif;
