@@ -140,14 +140,17 @@ struct signature_ops {
 
 enum signature_types {
 	SIG_TYPE_CRC32 = 0,
-	SIG_TYPE_T10DIFF,
+	SIG_TYPE_T10DIF_TYPE1,
+	SIG_TYPE_T10DIF_TYPE2,
+	SIG_TYPE_T10DIF_TYPE3,
 
 	SIG_TYPE_MAX,
 };
 
 void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *, void *);
 void dump_pi_crc32(void *);
-void set_sig_domain_t10dif(struct mlx5dv_sig_block_domain *, void *);
+void set_sig_domain_t10dif_type1_2(struct mlx5dv_sig_block_domain *, void *);
+void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *, void *);
 void dump_pi_t10dif(void *);
 
 const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
@@ -158,10 +161,28 @@ const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
 		.dump_pi	= dump_pi_crc32,
 		.check_mask	= MLX5DV_SIG_CHECK_CRC32,
 	},
-	[SIG_TYPE_T10DIFF] = {
-		.name		= "t10dif",
+	[SIG_TYPE_T10DIF_TYPE1] = {
+		.name		= "t10dif-type1",
 		.pi_size	= 8,
-		.set_sig_domain	= set_sig_domain_t10dif,
+		.set_sig_domain	= set_sig_domain_t10dif_type1_2,
+		.dump_pi	= dump_pi_t10dif,
+		.check_mask	= MLX5DV_SIG_CHECK_T10DIF_GUARD |
+				  MLX5DV_SIG_CHECK_T10DIF_APPTAG |
+				  MLX5DV_SIG_CHECK_T10DIF_REFTAG,
+	},
+	[SIG_TYPE_T10DIF_TYPE2] = {
+		.name		= "t10dif-type2",
+		.pi_size	= 8,
+		.set_sig_domain	= set_sig_domain_t10dif_type1_2,
+		.dump_pi	= dump_pi_t10dif,
+		.check_mask	= MLX5DV_SIG_CHECK_T10DIF_GUARD |
+				  MLX5DV_SIG_CHECK_T10DIF_APPTAG |
+				  MLX5DV_SIG_CHECK_T10DIF_REFTAG,
+	},
+	[SIG_TYPE_T10DIF_TYPE3] = {
+		.name		= "t10dif-type3",
+		.pi_size	= 8,
+		.set_sig_domain	= set_sig_domain_t10dif_type3,
 		.dump_pi	= dump_pi_t10dif,
 		.check_mask	= MLX5DV_SIG_CHECK_T10DIF_GUARD |
 				  MLX5DV_SIG_CHECK_T10DIF_APPTAG |
@@ -631,7 +652,7 @@ void dump_pi_t10dif(void *pi_ptr)
 		ntohl(pi->ref_tag));
 }
 
-void set_sig_domain_t10dif(struct mlx5dv_sig_block_domain *domain, void *sig)
+void set_sig_domain_t10dif_type1_2(struct mlx5dv_sig_block_domain *domain, void *sig)
 {
 	struct mlx5dv_sig_t10dif *dif = sig;
 
@@ -641,7 +662,24 @@ void set_sig_domain_t10dif(struct mlx5dv_sig_block_domain *domain, void *sig)
 	dif->app_tag = 0x5678;
 	dif->ref_tag = 0xabcdef90;
 	dif->flags = MLX5DV_SIG_T10DIF_FLAG_REF_REMAP |
-		     MLX5DV_SIG_T10DIF_FLAG_APP_ESCAPE |
+		     MLX5DV_SIG_T10DIF_FLAG_APP_ESCAPE;
+
+	memset(domain, 0, sizeof(*domain));
+	domain->sig.dif = dif;
+	domain->sig_type = MLX5DV_SIG_TYPE_T10DIF;
+	domain->block_size = (config.block_size == 512) ? MLX5DV_SIG_BLOCK_SIZE_512 : MLX5DV_SIG_BLOCK_SIZE_4096;
+}
+
+void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *domain, void *sig)
+{
+	struct mlx5dv_sig_t10dif *dif = sig;
+
+	memset(dif, 0, sizeof(*dif));
+	dif->bg_type = MLX5DV_SIG_T10DIF_CRC;
+	dif->bg = 0xffff;
+	dif->app_tag = 0x5678;
+	dif->ref_tag = 0xabcdef90;
+	dif->flags = MLX5DV_SIG_T10DIF_FLAG_APP_ESCAPE |
 		     MLX5DV_SIG_T10DIF_FLAG_REF_ESCAPE;
 
 	memset(domain, 0, sizeof(*domain));
@@ -1879,8 +1917,9 @@ static void usage(const char *argv0)
 		" -n, --number-of-blocks <NB>  Number of blocks per RDMA operation (default 8)\n");
 	fprintf(stdout,
 		" -o, --interleave             Data blocks and protection blocks are interleaved in the same buf\n");
-	fprintf(stdout,
-		" -s, --sig-type <type>        Supported signature types: crc32, t10dif (default crc32)\n");
+	fprintf(stdout, " -s, --sig-type <type>        Supported signature "
+			"types: crc32, t10dif-type1, t10dif-type2, "
+			"t10dif-type3 (default crc32)\n");
 	fprintf(stdout,
 		" -l, --pipeline               Enable pipeline\n");
 	fprintf(stdout, " -c, --corrupt-data           Corrupt data (i.e., "
