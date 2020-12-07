@@ -22,16 +22,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#ifdef __x86_64__
-#define CACHE_LINE_SIZE 64
-#elif defined(__aarch64__)
-#define CACHE_LINE_SIZE 128
-#else
-#error Unknown architecture
-#endif
-#define CACHE_LINE_MASK (CACHE_LINE_SIZE - 1)
-#define CACHE_LINE_ALIGN(_x) ((_x + CACHE_LINE_MASK) & ~CACHE_LINE_MASK)
-
 /* poll CQ timeout in millisec (2 seconds) */
 #define MAX_POLL_CQ_TIMEOUT 2000
 #define MAX_WC_PER_POLL 32
@@ -52,31 +42,12 @@ enum test_type {
 	TEST_TYPE_UNKNOWN,
 };
 
-struct signature_ops {
-	const char *name;
-	size_t pi_size;
-	void (*set_sig_domain)(struct mlx5dv_sig_block_domain *, void *);
-	void (*dump_pi)(void *pi);
-	uint8_t check_mask;
-};
-
 enum signature_types {
 	SIG_TYPE_CRC32 = 0,
 	SIG_TYPE_MAX,
 };
 
-void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *, void *);
-void dump_pi_crc32(void *);
-
-const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
-	[SIG_TYPE_CRC32] = {
-		.name		= "crc32",
-		.pi_size	= 4,
-		.set_sig_domain	= set_sig_domain_crc32,
-		.dump_pi	= dump_pi_crc32,
-		.check_mask	= MLX5DV_SIG_CHECK_CRC32,
-	},
-};
+void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *, void *);
 
 /* structure of test parameters */
 struct config {
@@ -85,26 +56,22 @@ struct config {
 	uint32_t tcp_port;      /* server TCP port */
 	int ib_port;		/* local IB port to work with */
 	int gid_idx;		/* gid index to use */
-	int io_size;
+	int nb;
 	int queue_depth;
 	enum test_type type;
 	int time; /* test time in seconds */
-	bool signature_calc;
 	enum ibv_mtu mtu;
-	const struct signature_ops *sig;
 } conf = {
 	.dev_name 	= NULL,
 	.server_name 	= NULL,
 	.tcp_port 	= 19875,
 	.ib_port 	= 1,
 	.gid_idx 	= -1,
-	.io_size 	= 16384,
+	.nb		= 8,
 	.queue_depth 	= 1,
 	.type 		= TEST_TYPE_WRITE,
 	.time 		= 10,
-	.signature_calc = true,
 	.mtu 		= IBV_MTU_1024,
-	.sig 		= &sig_ops[SIG_TYPE_CRC32],
 };
 
 /* structure to exchange data which is needed to connect the QPs */
@@ -147,10 +114,11 @@ struct msg_rep_hdr {
 	uint32_t inline_data_size;
 } __attribute__((packed));
 
+#define PI_SIZE 8
+
 #define MAX_SEND_WRS 4
 #define CQ_SIZE ((MAX_SEND_WRS + 2) * conf.queue_depth)
 
-#define REPEATED_BLOCK_ELEMENTS 1
 #define RDMA_SGL_SIZE 4
 
 #define IOV_MAX_SIZE 1
@@ -160,23 +128,19 @@ struct msg_rep_hdr {
 
 #define MSG_REP_HDR_SIZE (sizeof(struct msg_rep_hdr))
 #define MSG_REP_MAX_SIZE (MSG_REP_HDR_SIZE + MSG_MAX_INLINE_DATA_SIZE)
-#define MSG_MAX_INLINE_DATA_SIZE 4096
-
-#define MAX_IO_SIZE (1024 * 1024)
+#define MSG_MAX_INLINE_DATA_SIZE 512
 
 /*
  * Data structure in server
  * ###################################################
- * # Data (4096)                                  #PI#
+ * # Data (512)                                  #PI#
  * ###################################################
- * # Data (4096)                                  #PI#
+ * # Data (512)                                  #PI#
  * ###################################################
- * # Data (4096)                                  #PI#
+ * # Data (512)                                  #PI#
  * ###################################################
  */
-#define SERVER_DATA_SIZE 4096
-#define SERVER_MAX_BLOCKS_PER_IO ((MAX_IO_SIZE - 1) / SERVER_DATA_SIZE + 1)
-#define CLIENT_DATA_BUFFER_SIZE MAX_IO_SIZE
+#define SERVER_DATA_SIZE 512 
 
 struct buffer {
 	uint8_t *ptr;
@@ -206,25 +170,13 @@ enum task_status {
 	TASK_STATUS_WR_CANCELED_WITH_ERR,
 };
 
-struct repeated_block {
-	size_t prev_suffix;
-	size_t prefix;
-	size_t data_size;
-	size_t signature_size;
-	size_t repeated_count;
-	size_t stride;
-	size_t suffix;
-};
-
 struct task {
 	uint64_t req_id;
 	enum task_types type;
 	enum task_status status;
-	uint32_t crc;
 	unsigned iov_size;
 	struct iov iov[IOV_MAX_SIZE];
 	unsigned data_len;
-	struct repeated_block repeated_block;
 	struct ind_buffer data_buf;
 };
 
@@ -237,8 +189,7 @@ struct rx_desc {
 struct tx_desc {
 	struct ind_buffer send_buf;
 	struct ibv_sge msg_sge;
-	struct ibv_sge rdma_sgl[RDMA_SGL_SIZE];
-	struct ibv_sge sig_sge;
+	struct ibv_sge sge;
 	struct mlx5dv_mkey *sig_mr;
 	struct ibv_send_wr wrs[MAX_SEND_WRS];
 	unsigned next_wr_idx;
@@ -277,21 +228,6 @@ struct resources {
 };
 
 static inline int server_check_async_event(struct resources *res);
-
-const struct signature_ops *parse_sig_type(const char *type)
-{
-	const struct signature_ops *sig = NULL;
-	int i;
-
-	for (i = 0; i < SIG_TYPE_MAX; i++) {
-		if (!strcmp(type, sig_ops[i].name)) {
-			sig = &sig_ops[i];
-			break;
-		}
-	}
-
-	return sig;
-}
 
 static inline int is_server() { return conf.server_name == NULL; }
 
@@ -729,9 +665,9 @@ void fill_buffer(struct buffer *buf)
 	uint8_t *data = get_buffer_ptr(buf);
 	int size = get_buffer_size(buf);
 
-	block_num = size / (SERVER_DATA_SIZE + conf.sig->pi_size);
-	fprintf(stderr, "size %d block_num %d pi_size %lu\n", size, block_num,
-		conf.sig->pi_size);
+	block_num = size / (SERVER_DATA_SIZE + PI_SIZE);
+	fprintf(stderr, "size %d block_num %d pi_size %d\n", size, block_num,
+		PI_SIZE);
 
 	memset(data, 0xA5, size);
 
@@ -740,8 +676,8 @@ void fill_buffer(struct buffer *buf)
 
 	for (i = 0; i < block_num; i++) {
 		data += SERVER_DATA_SIZE;
-		*(uint32_t *)data = htonl(0x699ACA21);
-		data += conf.sig->pi_size;
+		*(uint64_t *)data = htonll(0x9ec65678f0debc9a);
+		data += PI_SIZE;
 	}
 }
 
@@ -763,7 +699,6 @@ static struct mlx5dv_mkey *create_sig_mr(struct resources *res)
 static int create_rx(struct resources *res)
 {
 	size_t max_msg_size;
-	size_t max_msg_size_aligned;
 	struct buffer *recv_buf = &res->recv_buf;
 	int num_rx_descs = conf.queue_depth;
 	size_t offset = 0;
@@ -771,11 +706,8 @@ static int create_rx(struct resources *res)
 	int rc, i;
 
 	max_msg_size = is_client() ? MSG_REP_MAX_SIZE : MSG_REQ_MAX_SIZE;
-	max_msg_size_aligned = CACHE_LINE_ALIGN(max_msg_size);
-	fprintf(stdout, "RX max_msg_size: %lu, max_msg_size_aligned: %lu\n",
-		max_msg_size, max_msg_size_aligned);
 
-	rc = alloc_buffer(res->pd, max_msg_size_aligned * num_rx_descs,
+	rc = alloc_buffer(res->pd, max_msg_size * num_rx_descs,
 			  recv_buf);
 	if (rc)
 		return rc;
@@ -786,7 +718,7 @@ static int create_rx(struct resources *res)
 		goto err_free_buf;
 	}
 
-	for (i = 0; i < num_rx_descs; i++, offset += max_msg_size_aligned) {
+	for (i = 0; i < num_rx_descs; i++, offset += max_msg_size) {
 		struct rx_desc *desc = &rx[i];
 		struct ibv_sge *sge = &desc->sge;
 		struct ibv_recv_wr *wr = &desc->wr;
@@ -841,7 +773,6 @@ static void destroy_rx(struct resources *res)
 static int create_tx(struct resources *res)
 {
 	size_t max_msg_size;
-	size_t max_msg_size_aligned;
 	/* +1 for stop request */
 	int num_tx_descs = (conf.queue_depth + 1);
 	struct buffer *send_buf = &res->send_buf;
@@ -850,11 +781,8 @@ static int create_tx(struct resources *res)
 	int rc, i;
 
 	max_msg_size = is_client() ? MSG_REQ_MAX_SIZE : MSG_REP_MAX_SIZE;
-	max_msg_size_aligned = CACHE_LINE_ALIGN(max_msg_size);
-	fprintf(stdout, "TX max_msg_size: %lu, max_msg_size_aligned: %lu\n",
-		max_msg_size, max_msg_size_aligned);
 
-	rc = alloc_buffer(res->pd, max_msg_size_aligned * num_tx_descs,
+	rc = alloc_buffer(res->pd, max_msg_size * num_tx_descs,
 			  send_buf);
 	if (rc)
 		return rc;
@@ -865,7 +793,7 @@ static int create_tx(struct resources *res)
 		goto err_free_buf;
 	}
 
-	for (i = 0; i < num_tx_descs; i++, offset += max_msg_size_aligned) {
+	for (i = 0; i < num_tx_descs; i++, offset += max_msg_size) {
 		struct tx_desc *desc = &tx[i];
 		struct ibv_sge *sge = &desc->msg_sge;
 
@@ -934,10 +862,9 @@ static int create_tasks(struct resources *res)
 	int i, qe, rc;
 
 	if (is_client())
-		data_buf_size = CLIENT_DATA_BUFFER_SIZE;
+		data_buf_size = conf.nb * SERVER_DATA_SIZE;
 	else
-		data_buf_size = ((SERVER_MAX_BLOCKS_PER_IO + 2) *
-				 (SERVER_DATA_SIZE + conf.sig->pi_size));
+		data_buf_size = conf.nb * (SERVER_DATA_SIZE + PI_SIZE);
 
 	rc = alloc_buffer(res->pd, data_buf_size * num_tasks, data_buf);
 	if (rc)
@@ -951,21 +878,13 @@ static int create_tasks(struct resources *res)
 
 	for (i = 0; i < num_tasks; i++, offset += data_buf_size) {
 		struct task *task = &tasks[i];
-		struct repeated_block *rpb = &task->repeated_block;
 
 		rc = alloc_ind_buffer(data_buf, offset, data_buf_size,
 				      &task->data_buf);
 		if (rc)
 			goto err_free_tasks;
-
-		rpb->prev_suffix = 0;
-		rpb->prefix = 0;
-		rpb->repeated_count = 0;
-		rpb->data_size = SERVER_DATA_SIZE;
-		rpb->signature_size = conf.sig->pi_size;
-		rpb->stride = SERVER_DATA_SIZE + conf.sig->pi_size;
-		rpb->suffix = 0;
 	}
+
 	res->tasks = tasks;
 	res->num_tasks = num_tasks;
 
@@ -1088,26 +1007,22 @@ void set_sig_domain_none(struct mlx5dv_sig_block_domain *sd)
 	sd->sig_type = MLX5DV_SIG_TYPE_NONE;
 }
 
-void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *domain, void *sig)
+void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *domain, void *sig)
 {
-	struct mlx5dv_sig_crc *crc = sig;
+	struct mlx5dv_sig_t10dif *dif = sig;
+
+	memset(dif, 0, sizeof(*dif));
+	dif->bg_type = MLX5DV_SIG_T10DIF_CRC;
+	dif->bg = 0x9ec6;
+	dif->app_tag = 0x5678;
+	dif->ref_tag = 0xf0debc9a;
+	dif->flags = MLX5DV_SIG_T10DIF_FLAG_APP_ESCAPE |
+		     MLX5DV_SIG_T10DIF_FLAG_REF_ESCAPE;
 
 	memset(domain, 0, sizeof(*domain));
-	memset(crc, 0, sizeof(*crc));
-
-	domain->sig_type = MLX5DV_SIG_TYPE_CRC;
-	domain->block_size = MLX5DV_SIG_BLOCK_SIZE_4096;
-
-	crc->type = MLX5DV_SIG_CRC_TYPE_CRC32;
-	crc->seed.crc32 = 0xffffffff;
-	domain->sig.crc = crc;
-}
-
-void dump_pi_crc32(void *pi)
-{
-	uint32_t crc = ntohl(*(uint32_t *)pi);
-
-	fprintf(stdout, "crc32 0x%x\n", crc);
+	domain->sig.dif = dif;
+	domain->sig_type = MLX5DV_SIG_TYPE_T10DIF;
+	domain->block_size = MLX5DV_SIG_BLOCK_SIZE_512;
 }
 
 /* helper function to print the content of the async event */
@@ -1250,6 +1165,8 @@ static int poll_completion(struct resources *res)
 		    (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
 
 		server_check_async_event(res);
+		if (sq_drained)
+			return 1;
 
 	} while ((poll_result == 0) &&
 		 ((cur_time_msec - start_time_msec) < MAX_POLL_CQ_TIMEOUT));
@@ -1261,7 +1178,7 @@ static int poll_completion(struct resources *res)
 		/* the CQ is empty */
 		fprintf(stderr,
 			"completion wasn't found in the CQ after timeout\n");
-		rc = 1;
+		/** rc = 1; */
 	} else {
 		/* CQE found */
 		/** fprintf( */
@@ -1314,9 +1231,8 @@ int configure_sig_mkey(struct resources *res,
 	struct mlx5dv_qp_ex *dv_qp;
 	struct mlx5dv_mkey *mkey;
 	uint64_t data_addr;
-	struct repeated_block *rpb;
 	struct tx_desc *desc;
-	struct mlx5dv_mr_interleaved mr_interleaved[2];
+	struct ibv_sge sge;
 	uint32_t access_flags = IBV_ACCESS_LOCAL_WRITE |
 				IBV_ACCESS_REMOTE_READ |
 				IBV_ACCESS_REMOTE_WRITE;
@@ -1336,18 +1252,13 @@ int configure_sig_mkey(struct resources *res,
 	mlx5dv_wr_mkey_configure(dv_qp, mkey, 0);
 	mlx5dv_wr_set_mkey_access_flags(dv_qp, access_flags);
 
-	rpb = &task->repeated_block;
-
 	data_addr = get_ind_buffer_addr(&task->data_buf);
 
-	/* data */
-	mr_interleaved[0].addr = data_addr;
-	mr_interleaved[0].bytes_count = rpb->data_size;
-	mr_interleaved[0].bytes_skip = 0;
-	mr_interleaved[0].lkey = get_ind_buffer_lkey(&task->data_buf);
+	sge.addr = data_addr;
+	sge.length = conf.nb * (SERVER_DATA_SIZE + PI_SIZE);
+	sge.lkey = get_ind_buffer_lkey(&task->data_buf);
 
-	mlx5dv_wr_set_mkey_layout_interleaved(dv_qp, SERVER_MAX_BLOCKS_PER_IO,
-					      1, mr_interleaved);
+	mlx5dv_wr_set_mkey_layout_list(dv_qp, 1, &sge);
 
 	mlx5dv_wr_set_mkey_sig_block(dv_qp, sig_attr);
 
@@ -1369,12 +1280,14 @@ static int reg_data_mrs(struct resources *res, struct task *task)
 	struct mlx5dv_sig_block_attr sig_attr = {
 		.mkey = &mkey,
 		.wire = &wire,
-		.check_mask = conf.sig->check_mask,
+		.check_mask = MLX5DV_SIG_CHECK_T10DIF_GUARD |
+			      MLX5DV_SIG_CHECK_T10DIF_APPTAG |
+			      MLX5DV_SIG_CHECK_T10DIF_REFTAG,
 	};
 	int rc;
 
 	set_sig_domain_none(&wire);
-	conf.sig->set_sig_domain(&mkey, &mkey_sig);
+	set_sig_domain_t10dif_type3(&mkey, &mkey_sig);
 
 	rc = configure_sig_mkey(res, &sig_attr, task);
 	if (rc) {
@@ -1961,7 +1874,7 @@ static int client_send_req(struct resources *res,
 		task = get_task(res, req_id);
 
 		iov->addr = htonll(get_ind_buffer_addr(&task->data_buf));
-		iov->length = htonl(conf.io_size);
+		iov->length = htonl(conf.nb * SERVER_DATA_SIZE);
 		iov->rkey = htonl(get_ind_buffer_rkey(&task->data_buf));
 		iov_size = 1;
 
@@ -2028,13 +1941,11 @@ static int client(struct resources *res)
 			switch (wc[i].opcode) {
 			case IBV_WC_SEND:
 				/* ignore successfull send completions */
-				/** fprintf(stdout, "WC wr_id %lu, opcode */
-				/**                 SEND\n ", */
+				/** fprintf(stdout, "WC wr_id %lu, opcode SEND\n ", */
 				/**                 wc[i].wr_id); */
 				break;
 			case IBV_WC_RECV:
-				/** fprintf(stdout, "WC wr_id %lu, opcode */
-				/**                 RECV\n ", */
+				/** fprintf(stdout, "WC wr_id %lu, opcode RECV\n ", */
 				/**                 wc[i].wr_id); */
 				desc = get_rx_desc(res, req_id);
 
@@ -2234,38 +2145,17 @@ static inline int server_send_reply(struct resources *res,
 static void server_rdma_write(struct resources *res, struct task *task) {
 	struct tx_desc *desc = get_tx_desc(res, task->req_id);
 	struct ibv_send_wr *wr = next_send_wr(desc);
-	struct repeated_block *rpb = &task->repeated_block;
-	struct ibv_sge *sgl = desc->rdma_sgl;
-	uint64_t addr;
-	short unsigned num_sge = 0;
+	struct ibv_sge *sge = &desc->sge;
 
-	addr = get_ind_buffer_addr(&task->data_buf);
+	sge->addr = 0;
+	/* length on wire domain */
+	sge->length = conf.nb * SERVER_DATA_SIZE;
+	sge->lkey = desc->sig_mr->lkey;
 
-	if (rpb->prefix) {
-		sgl[num_sge].addr = addr + rpb->prev_suffix;
-		sgl[num_sge].length = rpb->prefix;
-		sgl[num_sge].lkey = get_ind_buffer_lkey(&task->data_buf);
-		num_sge++;
-	}
-
-	if (rpb->repeated_count) {
-		sgl[num_sge].addr = 0;
-		/* length on wire domain */
-		sgl[num_sge].length = rpb->repeated_count * rpb->data_size;
-		sgl[num_sge].lkey = desc->sig_mr->lkey;
-		addr += rpb->repeated_count * rpb->stride;
-		num_sge++;
-	}
-	if (rpb->suffix) {
-		sgl[num_sge].addr = addr;
-		sgl[num_sge].length = rpb->suffix;
-		sgl[num_sge].lkey = get_ind_buffer_lkey(&task->data_buf);
-		num_sge++;
-	}
 	/** fill_wr: */
 	memset(wr, 0, sizeof(*wr));
-	wr->sg_list = sgl;
-	wr->num_sge = num_sge;
+	wr->sg_list = sge;
+	wr->num_sge = 1;
 	wr->opcode = IBV_WR_RDMA_WRITE;
 	wr->wr_id = task->req_id;
 	wr->wr.rdma.remote_addr = task->iov[0].addr;
@@ -2275,30 +2165,19 @@ static void server_rdma_write(struct resources *res, struct task *task) {
 static inline int server_handle_read_task(struct resources *res,
 					  struct task *task)
 {
-	struct repeated_block *rpb;
+	int rc;
 
-	if (res->last_data_tail > SERVER_DATA_SIZE) {
-		fprintf(stderr, "last_data_tail is too big\n");
-		return -1;
+	rc = reg_data_mrs(res, task);
+	if (rc) {
+		if (sq_drained) {
+			task->status = TASK_STATUS_FREE;
+			/** fprintf(stderr, "failed to reg mr due to sq_drained %lu\n", task->req_id); */
+			return 0;
+		}
+		fprintf(stderr, "failed to reg mr due without sq_drained %lu\n", task->req_id);
+		return rc;
 	}
 
-	rpb = &task->repeated_block;
-	rpb->prev_suffix = res->last_data_tail;
-	rpb->prefix =
-	    rpb->prev_suffix ? (SERVER_DATA_SIZE - rpb->prev_suffix) : 0;
-
-	if (task->data_len < rpb->prefix)
-		rpb->prefix = task->data_len;
-
-	rpb->repeated_count = (task->data_len - rpb->prefix) / SERVER_DATA_SIZE;
-	rpb->suffix = task->data_len - rpb->prefix -
-		      rpb->repeated_count * SERVER_DATA_SIZE;
-	res->last_data_tail = rpb->suffix;
-
-	if (rpb->suffix > SERVER_DATA_SIZE)
-		return -1;
-
-	reg_data_mrs(res, task);
 	server_rdma_write(res, task);
 
 	/* send reply with rdma write */
@@ -2334,7 +2213,7 @@ static inline int server_handle_async_event(struct resources *res)
 		if (check_sig_mr(desc->sig_mr)) {
 			wr_num = mlx5dv_qp_cancel_posted_wrs(dv_qp, i);
 			if (wr_num) {
-				fprintf(stderr, "cancel wr %d\n", i);
+				/** fprintf(stderr, "cancel wr %d\n", i); */
 				task = get_task(res, i);
 				task->status =
 				    TASK_STATUS_WR_CANCELED_WITH_ERR;
@@ -2355,6 +2234,7 @@ static inline int server_handle_async_event(struct resources *res)
 	}
 #endif
 	modify_qp_to_rts(qp, flags);
+	/** fprintf(stderr, "qp move to RTS\n"); */
 
 	sq_drained = false;
 
@@ -2571,7 +2451,7 @@ static void print_config(void) {
 		fprintf(stdout, " GID index : %u\n", conf.gid_idx);
 
 	fprintf(stdout, " Block size : %u\n", SERVER_DATA_SIZE);
-	fprintf(stdout, " I/O size : %d\n", conf.io_size);
+	fprintf(stdout, " I/O size : %d\n", conf.nb * SERVER_DATA_SIZE);
 	fprintf(stdout, " Queue depth : %d\n", conf.queue_depth);
 	fprintf(stdout,
 		" ------------------------------------------------\n\n");
@@ -2608,10 +2488,8 @@ static void usage(const char *argv0) {
 	fprintf(stdout,
 		" -g, --gid-idx <gid index>    gid index to be used in GRH "
 		"(default not used)\n");
-	fprintf(
-	    stdout,
-	    " -s, --io-size <size>         I/O size in bytes (from %u to %u)\n",
-	    MSG_MAX_INLINE_DATA_SIZE + 1, MAX_IO_SIZE);
+	fprintf(stdout, " -n, --number-of-blocks <NB>  Number of blocks per "
+			"RDMA operation (default 8)\n");
 	fprintf(stdout, " -q, --queue-depth <num>      number of simultaneous "
 			"requests per QP"
 			" that a client can send to the server.\n");
@@ -2647,19 +2525,19 @@ int main(int argc, char *argv[])
 	while (1) {
 		int c;
 		static struct option long_options[] = {
-			{ .name = "help",	.has_arg = 1, .val = 'h' },
-			{ .name = "port",	.has_arg = 1, .val = 'p' },
-			{ .name = "ib-dev",	.has_arg = 1, .val = 'd' },
-			{ .name = "ib-port",	.has_arg = 1, .val = 'i' },
-			{ .name = "gid-idx",	.has_arg = 1, .val = 'g' },
-			{ .name = "io-size",	.has_arg = 1, .val = 's' },
-			{ .name = "queue-depth",.has_arg = 1, .val = 'q' },
-			{ .name = "time",	.has_arg = 1, .val = 't' },
-			{ .name = "mtu",	.has_arg = 1, .val = 'm' },
-			{ .name = NULL,		.has_arg = 0, .val = '\0' }
+			{ .name = "help",		.has_arg = 1, .val = 'h' },
+			{ .name = "port",		.has_arg = 1, .val = 'p' },
+			{ .name = "ib-dev",		.has_arg = 1, .val = 'd' },
+			{ .name = "ib-port",		.has_arg = 1, .val = 'i' },
+			{ .name = "gid-idx",		.has_arg = 1, .val = 'g' },
+			{ .name = "number-of-blocks",	.has_arg = 1, .val = 'n' },
+			{ .name = "queue-depth",	.has_arg = 1, .val = 'q' },
+			{ .name = "time",		.has_arg = 1, .val = 't' },
+			{ .name = "mtu",		.has_arg = 1, .val = 'm' },
+			{ .name = NULL,			.has_arg = 0, .val = '\0' }
 		};
 
-		c = getopt_long(argc, argv, "hp:d:i:g:s:q:t:m", long_options,
+		c = getopt_long(argc, argv, "hp:d:i:g:n:s:q:t:m", long_options,
 				NULL);
 		if (c == -1)
 			break;
@@ -2687,10 +2565,9 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 			break;
-		case 's':
-			conf.io_size = strtoul(optarg, NULL, 0);
-			if (conf.io_size < MSG_MAX_INLINE_DATA_SIZE + 1 ||
-			    conf.io_size > MAX_IO_SIZE) {
+		case 'n':
+			conf.nb = strtoul(optarg, NULL, 0);
+			if (conf.nb < 1) {
 				usage(argv[0]);
 				return 1;
 			}
@@ -2767,6 +2644,11 @@ int main(int argc, char *argv[])
 		 */
 		alarm(conf.time + 1);
 		rc = server(&res);
+	}
+
+	// avoid crash while calculate time/comp bellow
+	if (!res.comps_counter) {
+		res.comps_counter = 1;
 	}
 
 	fprintf(stdout, "Polls %lu, completions %lu, comps/poll %.1f\n",
