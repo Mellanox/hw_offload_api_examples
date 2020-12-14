@@ -1,0 +1,19 @@
+
+BUILD
+=====
+
+$ make
+cc -I/.autodirect/mtrswgwork/allenz/work/new_api/rdma-core/build/include -g -std=c99 -Wall -Wno-unused-function   -c -o pipelining_example.o pipelining_example.c
+cc -L/.autodirect/mtrswgwork/allenz/work/new_api/rdma-core/build/lib -Wl,-rpath -Wl,/.autodirect/mtrswgwork/allenz/work/new_api/rdma-core/build/lib -o ibv_pipelining_example pipelining_example.o -lmlx5 -libverbs
+
+
+
+Examples:
+
+# Run the server
+./ibv_pipelining_example -d mlx5_1 -g 3 -q 8
+
+# Run the initiator
+./ibv_pipelining_example -d mlx5_1 -g 3 -q 8 2.2.2.2
+
+# Run './ibv_pipelining_example --help' for more information.
