@@ -2095,7 +2095,9 @@ int main(int argc, char *argv[])
 	}
 
 	if ((config.corrupt_app_tag || config.corrupt_ref_tag) &&
-	    (strcmp("t10dif", config.sig->name))) {
+	    strcmp("t10dif-type1", config.sig->name) &&
+	    strcmp("t10dif-type2", config.sig->name) &&
+	    strcmp("t10dif-type3", config.sig->name)) {
 		usage(argv[0]);
 		return 1;
 	}
