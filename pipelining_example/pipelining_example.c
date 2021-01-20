@@ -671,12 +671,18 @@ void fill_buffer(struct buffer *buf)
 
 	memset(data, 0xA5, size);
 
-	// corrupt the first byte of buf 
+	/* corrupt the first byte of buf */
 	*data = ~(*data);
 
 	for (i = 0; i < block_num; i++) {
 		data += SERVER_DATA_SIZE;
-		*(uint64_t *)data = htonll(0x9ec65678f0debc9a);
+		/*
+		 * Since data and signature properties are currently hardcoded
+		 * we pre-calculate T10DIF signature value. It is equal to
+		 * 0xec7d5678f0debc9a which splits into CRC 0xec7d, APP_TAG
+		 * 0x5678, REF_TAG 0xf0debc9a.
+		 */
+		*(uint64_t *)data = htonll(0xec7d5678f0debc9a);
 		data += PI_SIZE;
 	}
 }
@@ -1013,7 +1019,7 @@ void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *domain, void *s
 
 	memset(dif, 0, sizeof(*dif));
 	dif->bg_type = MLX5DV_SIG_T10DIF_CRC;
-	dif->bg = 0x9ec6;
+	dif->bg = 0xffff;
 	dif->app_tag = 0x5678;
 	dif->ref_tag = 0xf0debc9a;
 	dif->flags = MLX5DV_SIG_T10DIF_FLAG_APP_ESCAPE |
@@ -1186,8 +1192,7 @@ static int poll_completion(struct resources *res)
 		/**     "completion was found in CQ with status 0x%x, opcode %u\n", */
 		/**     wc.status, wc.opcode); */
 		/* check the completion status (here we don't care about the
-		 * completion
-		 * opcode */
+		 * completion opcode */
 		if (wc.status != IBV_WC_SUCCESS) {
 			fprintf(stderr, "got bad completion with status: 0x%x, "
 					"vendor syndrome: 0x%x\n",
@@ -2174,7 +2179,7 @@ static inline int server_handle_read_task(struct resources *res,
 			/** fprintf(stderr, "failed to reg mr due to sq_drained %lu\n", task->req_id); */
 			return 0;
 		}
-		fprintf(stderr, "failed to reg mr due without sq_drained %lu\n", task->req_id);
+		fprintf(stderr, "failed to reg mr without sq_drained %lu\n", task->req_id);
 		return rc;
 	}
 
@@ -2213,28 +2218,13 @@ static inline int server_handle_async_event(struct resources *res)
 		if (check_sig_mr(desc->sig_mr)) {
 			wr_num = mlx5dv_qp_cancel_posted_wrs(dv_qp, i);
 			if (wr_num) {
-				/** fprintf(stderr, "cancel wr %d\n", i); */
 				task = get_task(res, i);
 				task->status =
 				    TASK_STATUS_WR_CANCELED_WITH_ERR;
 			}
 		}
 	}
-#if 1
-	// FIXME: fail to change to RTS without query
-	struct ibv_qp_attr attr;
-	struct ibv_qp_init_attr init_attr;
-
-	if (ibv_query_qp(qp, &attr, IBV_QP_STATE, &init_attr)) {
-		fprintf(stderr, "Failed to query QP state\n");
-	} else {
-		if (IBV_QPS_SQD == attr.qp_state) {
-			/** fprintf(stdout, "detect SQD\n"); */
-		}
-	}
-#endif
 	modify_qp_to_rts(qp, flags);
-	/** fprintf(stderr, "qp move to RTS\n"); */
 
 	sq_drained = false;
 
@@ -2251,7 +2241,6 @@ static inline int server_check_async_event(struct resources *res)
 	}
 	print_async_event(res->ib_ctx, &event);
 	if (IBV_EVENT_SQ_DRAINED == event.event_type) {
-		/** fprintf(stdout, " got sq_drained\n"); */
 		sq_drained = true;
 	}
 	ibv_ack_async_event(&event);
