@@ -1661,9 +1661,11 @@ static int modify_qp_to_err(struct ibv_qp *qp)
  * Description
  * Transition a QP from the RTR to RTS state
  ******************************************************************************/
-static int modify_qp_to_rts(struct ibv_qp *qp, int flags)
+static int modify_qp_to_rts(struct ibv_qp *qp)
 {
 	struct ibv_qp_attr attr;
+	int flags = IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
+		    IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC;
 	int rc;
 	memset(&attr, 0, sizeof(attr));
 	attr.qp_state = IBV_QPS_RTS;
@@ -1672,6 +1674,21 @@ static int modify_qp_to_rts(struct ibv_qp *qp, int flags)
 	attr.rnr_retry = 0;
 	attr.sq_psn = 0;
 	attr.max_rd_atomic = 1;
+
+	rc = ibv_modify_qp(qp, &attr, flags);
+	if (rc)
+		fprintf(stderr, "failed to modify QP state to RTS, rc %d\n", rc);
+	return rc;
+}
+
+static int modify_qp_from_sqd_to_rts(struct ibv_qp *qp)
+{
+	struct ibv_qp_attr attr;
+	int flags = IBV_QP_STATE | IBV_QP_CUR_STATE;
+	int rc;
+	memset(&attr, 0, sizeof(attr));
+	attr.qp_state = IBV_QPS_RTS;
+	attr.cur_qp_state = IBV_QPS_SQD;
 
 	rc = ibv_modify_qp(qp, &attr, flags);
 	if (rc)
@@ -1784,9 +1801,7 @@ static int connect_qp(struct resources *res)
 		    res->qp->qp_num, remote_con_data.qp_num);
 		goto connect_qp_exit;
 	}
-	int flags = IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
-		    IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC;
-	rc = modify_qp_to_rts(res->qp, flags);
+	rc = modify_qp_to_rts(res->qp);
 	if (rc) {
 		fprintf(stderr, "failed to modify QP 0x%x state to RTS\n",
 			res->qp->qp_num);
@@ -2169,7 +2184,6 @@ static inline int server_handle_write_task(struct resources *res,
 static inline int server_handle_async_event(struct resources *res)
 {
 	int i, wr_num, rc = 0;
-	int flags = IBV_QP_STATE;
 	struct ibv_qp *qp;
 	struct task *task;
 
@@ -2193,7 +2207,7 @@ static inline int server_handle_async_event(struct resources *res)
 			}
 		}
 	}
-	modify_qp_to_rts(qp, flags);
+	modify_qp_from_sqd_to_rts(qp);
 
 	sq_drained = false;
 
