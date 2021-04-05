@@ -3,14 +3,13 @@ DEBUG ?= 0
 
 CC ?= gcc
 
-RDMA_CORE_PATH ?= /.autodirect/mtrswgwork/allenz/work/new_api/rdma-core
-
-CFLAGS = -I${RDMA_CORE_PATH}/build/include
-CFLAGS += -g
-CFLAGS += -std=c99 -Wall -Wno-unused-function
-
-LDFLAGS = -L${RDMA_CORE_PATH}/build/lib
+ifdef RDMA_CORE_PATH
+CFLAGS += -I${RDMA_CORE_PATH}/build/include
+LDFLAGS += -L${RDMA_CORE_PATH}/build/lib
 LDFLAGS += -Wl,-rpath -Wl,${RDMA_CORE_PATH}/build/lib
+endif
+
+CFLAGS += -std=c99 -Wall
 
 LIBS = -lmlx5 -libverbs
 
