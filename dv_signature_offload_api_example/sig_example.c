@@ -636,13 +636,6 @@ static int post_receive(struct resources *res)
 	return rc;
 }
 
-void set_sig_domain_none(struct mlx5dv_sig_block_domain *sd)
-{
-	memset(sd, 0, sizeof(struct mlx5dv_sig_block_domain));
-
-	sd->sig_type = MLX5DV_SIG_TYPE_NONE;
-}
-
 void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *domain, void *sig)
 {
 	struct mlx5dv_sig_crc *crc = sig;
@@ -651,10 +644,10 @@ void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *domain, void *sig)
 	memset(crc, 0, sizeof(*crc));
 
 	domain->sig_type = MLX5DV_SIG_TYPE_CRC;
-	domain->block_size = (config.block_size == 512) ? MLX5DV_SIG_BLOCK_SIZE_512 : MLX5DV_SIG_BLOCK_SIZE_4096;
+	domain->block_size = (config.block_size == 512) ? MLX5DV_BLOCK_SIZE_512 : MLX5DV_BLOCK_SIZE_4096;
 
 	crc->type = MLX5DV_SIG_CRC_TYPE_CRC32;
-	crc->seed.crc32 = 0xffffffff;
+	crc->seed = 0xffffffff;
 	domain->sig.crc = crc;
 }
 
@@ -699,7 +692,7 @@ void set_sig_domain_t10dif_type1_2(struct mlx5dv_sig_block_domain *domain, void 
 	memset(domain, 0, sizeof(*domain));
 	domain->sig.dif = dif;
 	domain->sig_type = MLX5DV_SIG_TYPE_T10DIF;
-	domain->block_size = (config.block_size == 512) ? MLX5DV_SIG_BLOCK_SIZE_512 : MLX5DV_SIG_BLOCK_SIZE_4096;
+	domain->block_size = (config.block_size == 512) ? MLX5DV_BLOCK_SIZE_512 : MLX5DV_BLOCK_SIZE_4096;
 }
 
 void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *domain, void *sig)
@@ -711,13 +704,12 @@ void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *domain, void *s
 	dif->bg = 0xffff;
 	dif->app_tag = 0x5678;
 	dif->ref_tag = 0xabcdef90;
-	dif->flags = MLX5DV_SIG_T10DIF_FLAG_APP_ESCAPE |
-		     MLX5DV_SIG_T10DIF_FLAG_REF_ESCAPE;
+	dif->flags = MLX5DV_SIG_T10DIF_FLAG_APP_REF_ESCAPE;
 
 	memset(domain, 0, sizeof(*domain));
 	domain->sig.dif = dif;
 	domain->sig_type = MLX5DV_SIG_TYPE_T10DIF;
-	domain->block_size = (config.block_size == 512) ? MLX5DV_SIG_BLOCK_SIZE_512 : MLX5DV_SIG_BLOCK_SIZE_4096;
+	domain->block_size = (config.block_size == 512) ? MLX5DV_BLOCK_SIZE_512 : MLX5DV_BLOCK_SIZE_4096;
 }
 
 int configure_sig_mkey(struct resources *res,
@@ -727,6 +719,7 @@ int configure_sig_mkey(struct resources *res,
 	struct ibv_qp_ex *qpx = ibv_qp_to_qp_ex(res->qp);
 	struct mlx5dv_qp_ex *dv_qp = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
 	struct mlx5dv_mkey *mkey = res->sig_mr;
+	struct mlx5dv_mkey_conf_attr conf_attr = {};
 	uint32_t access_flags = IBV_ACCESS_LOCAL_WRITE |
 				IBV_ACCESS_REMOTE_READ |
 				IBV_ACCESS_REMOTE_WRITE;
@@ -737,7 +730,7 @@ int configure_sig_mkey(struct resources *res,
 	qpx->wr_id = 0;
 	qpx->wr_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
 
-	mlx5dv_wr_mkey_configure(dv_qp, mkey, 0);
+	mlx5dv_wr_mkey_configure(dv_qp, mkey, 3, &conf_attr);
 	mlx5dv_wr_set_mkey_access_flags(dv_qp, access_flags);
 
 	if ((!res->pi_buf) ||
@@ -777,15 +770,15 @@ int reg_sig_mr(struct resources *res,
 	union {
 		struct mlx5dv_sig_t10dif t10dif;
 		struct mlx5dv_sig_crc crc;
-	} mkey_sig;
+	} mem_sig;
 	union {
 		struct mlx5dv_sig_t10dif t10dif;
 		struct mlx5dv_sig_crc crc;
 	} wire_sig;
-	struct mlx5dv_sig_block_domain mkey;
+	struct mlx5dv_sig_block_domain mem;
 	struct mlx5dv_sig_block_domain wire;
 	struct mlx5dv_sig_block_attr sig_attr = {
-		.mkey = &mkey,
+		.mem = &mem,
 		.wire = &wire,
 		.check_mask = config.sig->check_mask,
 	};
@@ -794,11 +787,11 @@ int reg_sig_mr(struct resources *res,
 	switch (mode) {
 	case SIG_MODE_INSERT:
 	case SIG_MODE_STRIP:
-		set_sig_domain_none(&mkey);
+		sig_attr.mem = NULL;
 		config.sig->set_sig_domain(&wire, &wire_sig);
 		break;
 	case SIG_MODE_CHECK:
-		config.sig->set_sig_domain(&mkey, &mkey_sig);
+		config.sig->set_sig_domain(&mem, &mem_sig);
 		config.sig->set_sig_domain(&wire, &wire_sig);
 		break;
 	default:
