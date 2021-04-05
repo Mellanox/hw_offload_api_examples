@@ -1006,13 +1006,6 @@ int check_sig_mr(struct mlx5dv_mkey *mkey)
 	return rc;
 }
 
-void set_sig_domain_none(struct mlx5dv_sig_block_domain *sd)
-{
-	memset(sd, 0, sizeof(struct mlx5dv_sig_block_domain));
-
-	sd->sig_type = MLX5DV_SIG_TYPE_NONE;
-}
-
 void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *domain, void *sig)
 {
 	struct mlx5dv_sig_t10dif *dif = sig;
@@ -1022,13 +1015,12 @@ void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *domain, void *s
 	dif->bg = 0xffff;
 	dif->app_tag = 0x5678;
 	dif->ref_tag = 0xf0debc9a;
-	dif->flags = MLX5DV_SIG_T10DIF_FLAG_APP_ESCAPE |
-		     MLX5DV_SIG_T10DIF_FLAG_REF_ESCAPE;
+	dif->flags = MLX5DV_SIG_T10DIF_FLAG_APP_REF_ESCAPE;
 
 	memset(domain, 0, sizeof(*domain));
 	domain->sig.dif = dif;
 	domain->sig_type = MLX5DV_SIG_TYPE_T10DIF;
-	domain->block_size = MLX5DV_SIG_BLOCK_SIZE_512;
+	domain->block_size = MLX5DV_BLOCK_SIZE_512;
 }
 
 /* helper function to print the content of the async event */
@@ -1237,6 +1229,7 @@ int configure_sig_mkey(struct resources *res,
 	struct mlx5dv_mkey *mkey;
 	uint64_t data_addr;
 	struct tx_desc *desc;
+	struct mlx5dv_mkey_conf_attr conf_attr = {};
 	struct ibv_sge sge;
 	uint32_t access_flags = IBV_ACCESS_LOCAL_WRITE |
 				IBV_ACCESS_REMOTE_READ |
@@ -1254,7 +1247,7 @@ int configure_sig_mkey(struct resources *res,
 	qpx->wr_id = 0;
 	qpx->wr_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
 
-	mlx5dv_wr_mkey_configure(dv_qp, mkey, 0);
+	mlx5dv_wr_mkey_configure(dv_qp, mkey, 3, &conf_attr);
 	mlx5dv_wr_set_mkey_access_flags(dv_qp, access_flags);
 
 	data_addr = get_ind_buffer_addr(&task->data_buf);
@@ -1275,24 +1268,18 @@ static int reg_data_mrs(struct resources *res, struct task *task)
 	union {
 		struct mlx5dv_sig_t10dif t10dif;
 		struct mlx5dv_sig_crc crc;
-	} mkey_sig;
-	/** union { */
-	/**         struct mlx5dv_sig_t10dif t10dif; */
-	/**         struct mlx5dv_sig_crc crc; */
-	/** } wire_sig; */
-	struct mlx5dv_sig_block_domain mkey;
-	struct mlx5dv_sig_block_domain wire;
+	} mem_sig;
+	struct mlx5dv_sig_block_domain mem;
 	struct mlx5dv_sig_block_attr sig_attr = {
-		.mkey = &mkey,
-		.wire = &wire,
+		.mem = &mem,
+		.wire = NULL,
 		.check_mask = MLX5DV_SIG_CHECK_T10DIF_GUARD |
 			      MLX5DV_SIG_CHECK_T10DIF_APPTAG |
 			      MLX5DV_SIG_CHECK_T10DIF_REFTAG,
 	};
 	int rc;
 
-	set_sig_domain_none(&wire);
-	set_sig_domain_t10dif_type3(&mkey, &mkey_sig);
+	set_sig_domain_t10dif_type3(&mem, &mem_sig);
 
 	rc = configure_sig_mkey(res, &sig_attr, task);
 	if (rc) {
@@ -1306,24 +1293,6 @@ static int reg_data_mrs(struct resources *res, struct task *task)
 	}
 
 	return rc;
-}
-
-static int reg_all_data_mrs(struct resources *res)
-{
-	int i, rc;
-
-	if (is_client())
-		return 0;
-
-	for (i = 0; i < res->num_tasks; i++) {
-		struct task *task = &res->tasks[i];
-
-		rc = reg_data_mrs(res, task);
-		if (rc)
-			return rc;
-	}
-
-	return 0;
 }
 
 /******************************************************************************
@@ -2216,7 +2185,7 @@ static inline int server_handle_async_event(struct resources *res)
 	for (i = 0; i < conf.queue_depth; i++) {
 		desc = get_tx_desc(res, i);
 		if (check_sig_mr(desc->sig_mr)) {
-			wr_num = mlx5dv_qp_cancel_posted_wrs(dv_qp, i);
+			wr_num = mlx5dv_qp_cancel_posted_send_wrs(dv_qp, i);
 			if (wr_num) {
 				task = get_task(res, i);
 				task->status =
