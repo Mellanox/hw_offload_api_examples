@@ -22,8 +22,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-/* poll CQ timeout in millisec (2 seconds) */
-#define MAX_POLL_CQ_TIMEOUT 2000
 #define MAX_WC_PER_POLL 32
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
@@ -36,16 +34,36 @@ static inline uint64_t ntohll(uint64_t x) { return x; }
 #error __BYTE_ORDER is neither __LITTLE_ENDIAN nor __BIG_ENDIAN
 #endif
 
-enum test_type {
-	TEST_TYPE_WRITE,
-	TEST_TYPE_READ,
-	TEST_TYPE_UNKNOWN,
-};
 
-enum signature_types {
-	SIG_TYPE_CRC32 = 0,
-	SIG_TYPE_MAX,
-};
+
+static int log_lvl = 1;
+
+#define dbg(format, arg...)						\
+	do {								\
+		if (log_lvl >= 2) {					\
+			int tmp = errno;				\
+			fprintf(stdout, "DEBUG: " format, ##arg);	\
+			errno = tmp;					\
+		}							\
+	} while (0)
+
+#define info(format, arg...)						\
+	do {								\
+		if (log_lvl >= 1) {					\
+			int tmp = errno;				\
+			fprintf(stdout, "INFO: " format, ##arg);	\
+			errno = tmp;					\
+		}							\
+	} while (0)
+
+#define err(format, arg...)						\
+	do {								\
+		if (log_lvl >= 0) {					\
+			int tmp = errno;				\
+			fprintf(stderr, "ERROR: " format, ##arg);	\
+			errno = tmp;					\
+		}							\
+	} while (0)
 
 void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *, void *);
 
@@ -58,21 +76,30 @@ struct config {
 	int gid_idx;		/* gid index to use */
 	int nb;
 	int queue_depth;
-	enum test_type type;
-	int time; /* test time in seconds */
-	enum ibv_mtu mtu;
+	int time;		/* test time in seconds */
+	long int iters;		/* number of iteratios */
 } conf = {
 	.dev_name 	= NULL,
 	.server_name 	= NULL,
 	.tcp_port 	= 19875,
 	.ib_port 	= 1,
-	.gid_idx 	= -1,
+	.gid_idx 	= 0,
 	.nb		= 8,
-	.queue_depth 	= 1,
-	.type 		= TEST_TYPE_WRITE,
+	.queue_depth 	= 8,
 	.time 		= 10,
-	.mtu 		= IBV_MTU_1024,
+	.iters		= -1,
 };
+
+#define PI_SIZE 8
+
+#define MAX_SEND_WRS 5
+#define CQ_SIZE ((MAX_SEND_WRS + 2) * conf.queue_depth)
+
+#define RDMA_SGL_SIZE 4
+
+#define IOV_MAX_SIZE 1
+
+#define SERVER_DATA_SIZE 512
 
 /* structure to exchange data which is needed to connect the QPs */
 struct cm_con_data_t {
@@ -84,8 +111,6 @@ struct cm_con_data_t {
 enum msg_types {
 	MSG_TYPE_READ_REQ = 0,
 	MSG_TYPE_READ_REP,
-	MSG_TYPE_WRITE_REQ,
-	MSG_TYPE_WRITE_REP,
 	MSG_TYPE_STOP_REQ,
 };
 
@@ -99,100 +124,57 @@ struct msg_req_hdr {
 	uint16_t type;
 	uint64_t id;
 	uint16_t iov_size;
-	uint32_t inline_data_size;
+} __attribute__((packed));
+
+struct msg_req {
+	struct msg_req_hdr hdr;
+	struct iov iov[IOV_MAX_SIZE];
 } __attribute__((packed));
 
 enum msg_rep_status {
 	MSG_REP_STATUS_OK = 0,
-	MSG_REP_STATUS_FAIL,
+	MSG_REP_STATUS_SIG_ERROR,
 };
 
 struct msg_rep_hdr {
 	uint16_t type;
 	uint64_t id;
 	uint16_t status;
-	uint32_t inline_data_size;
 } __attribute__((packed));
 
-#define PI_SIZE 8
+struct msg_rep {
+	struct msg_rep_hdr hdr;
+} __attribute__((packed));
 
-#define MAX_SEND_WRS 4
-#define CQ_SIZE ((MAX_SEND_WRS + 2) * conf.queue_depth)
+#define MSG_REQ_MAX_SIZE (sizeof(struct msg_req))
 
-#define RDMA_SGL_SIZE 4
-
-#define IOV_MAX_SIZE 1
-
-#define MSG_REQ_HDR_SIZE (sizeof(struct msg_req_hdr))
-#define MSG_REQ_MAX_SIZE (MSG_REQ_HDR_SIZE + MSG_MAX_INLINE_DATA_SIZE)
-
-#define MSG_REP_HDR_SIZE (sizeof(struct msg_rep_hdr))
-#define MSG_REP_MAX_SIZE (MSG_REP_HDR_SIZE + MSG_MAX_INLINE_DATA_SIZE)
-#define MSG_MAX_INLINE_DATA_SIZE 512
-
-/*
- * Data structure in server
- * ###################################################
- * # Data (512)                                  #PI#
- * ###################################################
- * # Data (512)                                  #PI#
- * ###################################################
- * # Data (512)                                  #PI#
- * ###################################################
- */
-#define SERVER_DATA_SIZE 512 
-
-struct buffer {
-	uint8_t *ptr;
-	size_t size;
-	size_t mem_size;
-	struct ibv_mr *mr;
-};
-
-struct ind_buffer {
-	struct buffer *orig;
-	size_t offset;
-	size_t size;
-};
-
-enum task_types {
-	TASK_TYPE_READ,
-	TASK_TYPE_WRITE
-};
+#define MSG_REP_MAX_SIZE (sizeof(struct msg_rep))
 
 enum task_status {
 	TASK_STATUS_FREE = 0,
 	TASK_STATUS_INITED,
-	TASK_STATUS_RDMA_READ_DONE,
-	TASK_STATUS_RDMA_WRITE_DONE,
-	TASK_STATUS_IO_DONE,
 	TASK_STATUS_REPLY_SENT,
-	TASK_STATUS_WR_CANCELED_WITH_ERR,
+	TASK_STATUS_WR_CANCELED_WITH_SIG_ERR,
 };
 
 struct task {
 	uint64_t req_id;
-	enum task_types type;
 	enum task_status status;
 	unsigned iov_size;
 	struct iov iov[IOV_MAX_SIZE];
-	unsigned data_len;
-	struct ind_buffer data_buf;
+	uint8_t *data;
+	uint32_t data_rkey;
+	uint32_t data_lkey;
 };
 
 struct rx_desc {
-	struct ind_buffer recv_buf;
+	uint8_t *msg;
 	struct ibv_sge sge;
 	struct ibv_recv_wr wr;
 };
 
 struct tx_desc {
-	struct ind_buffer send_buf;
-	struct ibv_sge msg_sge;
-	struct ibv_sge sge;
 	struct mlx5dv_mkey *sig_mr;
-	struct ibv_send_wr wrs[MAX_SEND_WRS];
-	unsigned next_wr_idx;
 };
 
 /* structure of system resources */
@@ -208,9 +190,13 @@ struct resources {
 	struct ibv_qp *qp;
 	/* TCP socket file descriptor */
 	int sock;
-	struct buffer send_buf;
-	struct buffer recv_buf;
-	struct buffer data_buf;
+
+	uint8_t *recv_buf;
+	struct ibv_mr *recv_mr;
+
+	uint8_t *data_buf;
+	size_t data_buf_size;
+	struct ibv_mr *data_mr;
 
 	int num_rx_descs;
 	struct rx_desc *rx;
@@ -227,35 +213,7 @@ struct resources {
 	uint64_t test_time;
 };
 
-static inline int server_check_async_event(struct resources *res);
-
 static inline int is_server() { return conf.server_name == NULL; }
-
-static inline struct ibv_send_wr *first_send_wr(struct tx_desc *desc)
-{
-	return desc->next_wr_idx ? desc->wrs : NULL;
-}
-
-static inline struct ibv_send_wr *next_send_wr(struct tx_desc *desc)
-{
-	struct ibv_send_wr *wrs = desc->wrs;
-	int next_idx = desc->next_wr_idx;
-	struct ibv_send_wr *next_wr;
-
-	if (next_idx >= MAX_SEND_WRS)
-		return NULL;
-
-	next_wr = &wrs[next_idx];
-	next_wr->next = NULL;
-
-	/* make a link from previous WR */
-	if (next_idx > 0)
-		wrs[next_idx - 1].next = next_wr;
-
-	desc->next_wr_idx = ++next_idx;
-
-	return next_wr;
-}
 
 static inline bool is_client()
 {
@@ -263,7 +221,6 @@ static inline bool is_client()
 }
 
 static volatile bool stop = false;
-static volatile bool sq_drained = false;
 
 void signal_handler(int sig)
 {
@@ -366,8 +323,7 @@ static int sock_connect(const char *servername, int port)
 	/* Resolve DNS address, use sockfd as temp storage */
 	sockfd = getaddrinfo(servername, service, &hints, &resolved_addr);
 	if (sockfd) {
-		fprintf(stderr, "%s for %s:%d\n", gai_strerror(sockfd),
-			servername, port);
+		err("%s for %s:%d\n", gai_strerror(sockfd), servername, port);
 		goto sock_connect_exit;
 	}
 	/* Search through results and find the one we want */
@@ -379,7 +335,7 @@ static int sock_connect(const char *servername, int port)
 				/* Client mode. Initiate connection to remote */
 				if ((tmp = connect(sockfd, iterator->ai_addr,
 						   iterator->ai_addrlen))) {
-					fprintf(stdout, "failed connect \n");
+					err("failed connect \n");
 					close(sockfd);
 					sockfd = -1;
 				}
@@ -410,11 +366,9 @@ sock_connect_exit:
 		freeaddrinfo(resolved_addr);
 	if (sockfd < 0) {
 		if (servername)
-			fprintf(stderr, "Couldn't connect to %s:%d\n",
-				servername, port);
+			err("Couldn't connect to %s:%d\n", servername, port);
 		else {
-			perror("server accept");
-			fprintf(stderr, "accept() failed\n");
+			err("accept() failed\n");
 		}
 	}
 	return sockfd;
@@ -451,7 +405,7 @@ int sock_sync_data(int sock, int xfer_size, char *local_data, char *remote_data)
 	int total_read_bytes = 0;
 	rc = write(sock, local_data, xfer_size);
 	if (rc != xfer_size)
-		fprintf(stderr, "Failed writing data during sock_sync_data\n");
+		err("Failed writing data during sock_sync_data\n");
 	else
 		rc = 0;
 	while (!rc && total_read_bytes < xfer_size) {
@@ -501,7 +455,7 @@ static int post_recv(struct ibv_qp *qp, struct rx_desc *desc)
 
 	rc = ibv_post_recv(qp, &desc->wr, &bad_wr);
 	if (rc)
-		fprintf(stderr, "failed to post RR: rc %d\n", rc);
+		err("failed to post RR, err %d\n", rc);
 
 	return rc;
 }
@@ -524,154 +478,57 @@ static int post_recv_all(struct resources *res)
 	return rc;
 }
 
-static void dereg_mr(struct ibv_mr **mr)
+static void dereg_mr(struct ibv_mr *mr)
 {
-	if (*mr) {
-		ibv_dereg_mr(*mr);
-		*mr = NULL;
+	if (mr) {
+		ibv_dereg_mr(mr);
 	}
 }
 
-int alloc_buffer(struct ibv_pd *pd, size_t size, struct buffer *buf)
+struct ibv_mr * alloc_mr(struct ibv_pd *pd, size_t size)
 {
 	int mr_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
 		       IBV_ACCESS_REMOTE_WRITE;
-	size_t page_size = sysconf(_SC_PAGESIZE);
-	size_t page_mask = page_size - 1;
-	/* align up to page size */
-	size_t mem_size = (size + page_mask) & ~page_mask;
+	void *ptr;
+	struct ibv_mr *mr;
 
-	memset(buf, 0, sizeof *buf);
-
-	if (!size)
-		return 0;
-
-	buf->ptr = mmap(0, mem_size, PROT_READ | PROT_WRITE,
-			MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	if (buf->ptr == MAP_FAILED) {
-		perror("mmap");
-		return -1;
-	}
-	memset(buf->ptr, 0, size);
-
-	buf->mr = ibv_reg_mr(pd, buf->ptr, size, mr_flags);
-	if (!buf->mr) {
-		perror("ibv_reg_mr");
-		munmap(buf->ptr, mem_size);
-		buf->ptr = NULL;
-		return -1;
+	ptr = calloc(1, size);
+	if (!ptr) {
+		err("calloc: err %d\n", errno);
+		return NULL;
 	}
 
-	buf->size = size;
-	buf->mem_size = mem_size;
-
-	return 0;
-}
-
-void free_buffer(struct buffer *buf)
-{
-	dereg_mr(&buf->mr);
-
-	if (buf->ptr && buf->ptr != MAP_FAILED) {
-		munmap(buf->ptr, buf->mem_size);
-		buf->ptr = NULL;
-	}
-	buf->size = 0;
-	buf->mem_size = 0;
-}
-
-static int alloc_ind_buffer(struct buffer *orig_buffer, size_t offset,
-			    size_t new_size, struct ind_buffer *buf)
-{
-	if (offset + new_size > orig_buffer->size) {
-		return -ENOMEM;
+	mr = ibv_reg_mr(pd, ptr, size, mr_flags);
+	if (!mr) {
+		err("ibv_reg_mr, err %d\n", errno);
+		free(ptr);
+		return NULL;
 	}
 
-	buf->orig = orig_buffer;
-	buf->offset = offset;
-	buf->size = new_size;
-
-	return 0;
+	return mr;
 }
 
-static inline size_t get_buffer_size(struct buffer *buf)
+void free_mr(struct ibv_mr *mr)
 {
-	return buf->size;
+	void *ptr;
+
+	if (mr) {
+		ptr = mr->addr;
+		dereg_mr(mr);
+		free(ptr);
+	}
 }
 
-static inline struct ibv_mr *get_buffer_mr(struct buffer *buf)
-{
-	return buf->mr;
-}
-
-static inline uint32_t get_buffer_rkey(struct buffer *buf)
-{
-	return buf->mr->rkey;
-}
-
-static inline uint32_t get_buffer_lkey(struct buffer *buf)
-{
-	return buf->mr->lkey;
-}
-
-static inline uint8_t *get_buffer_ptr(struct buffer *buf)
-{
-	return buf->ptr;
-}
-
-static inline uint64_t get_buffer_addr(struct buffer *buf)
-{
-	return (uintptr_t)buf->mr->addr;
-}
-
-static void free_ind_buffer(struct ind_buffer *buf)
-{
-	memset(buf, 0, sizeof(*buf));
-}
-
-static inline size_t get_ind_buffer_size(struct ind_buffer *buf)
-{
-	return get_buffer_size(buf->orig);
-}
-
-static inline struct ibv_mr *get_ind_buffer_mr(struct ind_buffer *buf)
-{
-	return get_buffer_mr(buf->orig);
-}
-
-static inline uint32_t get_ind_buffer_rkey(struct ind_buffer *buf)
-{
-	return get_buffer_rkey(buf->orig);
-}
-
-static inline uint32_t get_ind_buffer_lkey(struct ind_buffer *buf)
-{
-	return get_buffer_lkey(buf->orig);
-}
-
-static inline uint8_t *get_ind_buffer_ptr(struct ind_buffer *buf)
-{
-	return get_buffer_ptr(buf->orig) + buf->offset;
-}
-
-static inline uint64_t get_ind_buffer_addr(struct ind_buffer *buf)
-{
-	return get_buffer_addr(buf->orig) + buf->offset;
-}
-
-void fill_buffer(struct buffer *buf)
+void fill_data_buffer(uint8_t *data, size_t size)
 {
 	int i, block_num;
-	uint8_t *data = get_buffer_ptr(buf);
-	int size = get_buffer_size(buf);
 
 	block_num = size / (SERVER_DATA_SIZE + PI_SIZE);
-	fprintf(stderr, "size %d block_num %d pi_size %d\n", size, block_num,
-		PI_SIZE);
+	dbg("size %zu block_num %d pi_size %d\n", size, block_num, PI_SIZE);
 
 	memset(data, 0xA5, size);
 
-	/* corrupt the first byte of buf */
+	/* corrupt the first byte of data to trigger a signature error */
 	*data = ~(*data);
 
 	for (i = 0; i < block_num; i++) {
@@ -697,7 +554,7 @@ static struct mlx5dv_mkey *create_sig_mr(struct resources *res)
 	struct mlx5dv_mkey *mr;
 	mr = mlx5dv_create_mkey(&mkey_attr);
 	if (!mr)
-		perror("ibv_exp_create_mr");
+		err("ibv_exp_create_mr, err %d", errno);
 
 	return mr;
 }
@@ -705,7 +562,6 @@ static struct mlx5dv_mkey *create_sig_mr(struct resources *res)
 static int create_rx(struct resources *res)
 {
 	size_t max_msg_size;
-	struct buffer *recv_buf = &res->recv_buf;
 	int num_rx_descs = conf.queue_depth;
 	size_t offset = 0;
 	struct rx_desc *rx;
@@ -713,10 +569,11 @@ static int create_rx(struct resources *res)
 
 	max_msg_size = is_client() ? MSG_REP_MAX_SIZE : MSG_REQ_MAX_SIZE;
 
-	rc = alloc_buffer(res->pd, max_msg_size * num_rx_descs,
-			  recv_buf);
-	if (rc)
-		return rc;
+	res->recv_mr = alloc_mr(res->pd, max_msg_size * num_rx_descs);
+	if (!res->recv_mr)
+		return -ENOMEM;
+
+	res->recv_buf = res->recv_mr->addr;
 
 	rx = calloc(num_rx_descs, sizeof(struct rx_desc));
 	if (!rx) {
@@ -729,32 +586,26 @@ static int create_rx(struct resources *res)
 		struct ibv_sge *sge = &desc->sge;
 		struct ibv_recv_wr *wr = &desc->wr;
 
-		rc = alloc_ind_buffer(recv_buf, offset, max_msg_size,
-				      &desc->recv_buf);
-		if (rc)
-			goto err_free_rx;
+		desc->msg = res->recv_buf + offset;
 
-		sge->addr = get_ind_buffer_addr(&desc->recv_buf);
-		sge->length = get_ind_buffer_size(&desc->recv_buf);
-		sge->lkey = get_ind_buffer_lkey(&desc->recv_buf);
+		sge->addr = (uintptr_t)(desc->msg);
+		sge->length = max_msg_size;
+		sge->lkey = res->recv_mr->lkey;
 
 		wr->sg_list = sge;
 		wr->num_sge = 1;
 		wr->next = NULL;
+		dbg("RX[%d]: addr 0x%lx, length %u, lkey 0x%x\n",
+		    i, sge->addr, sge->length, sge->lkey);
 	}
 	res->rx = rx;
 	res->num_rx_descs = num_rx_descs;
 
 	return 0;
-err_free_rx:
-	for (i--; i >= 0; i--) {
-		struct rx_desc *desc = &rx[i];
-
-		free_ind_buffer(&desc->recv_buf);
-	}
-	free(rx);
 err_free_buf:
-	free_buffer(recv_buf);
+	free_mr(res->recv_mr);
+	res->recv_mr = NULL;
+	res->recv_buf = NULL;
 	res->rx = NULL;
 
 	return rc;
@@ -762,18 +613,15 @@ err_free_buf:
 
 static void destroy_rx(struct resources *res)
 {
-	int i;
-
 	if (res->rx) {
-		for (i = 0; i < res->num_rx_descs; i++) {
-			free_ind_buffer(&res->rx[i].recv_buf);
-		}
 		free(res->rx);
 		res->rx = NULL;
 		res->num_rx_descs = 0;
 	}
 
-	free_buffer(&res->recv_buf);
+	free_mr(res->recv_mr);
+	res->recv_mr = NULL;
+	res->recv_buf = NULL;
 }
 
 static int create_tx(struct resources *res)
@@ -781,36 +629,20 @@ static int create_tx(struct resources *res)
 	size_t max_msg_size;
 	/* +1 for stop request */
 	int num_tx_descs = (conf.queue_depth + 1);
-	struct buffer *send_buf = &res->send_buf;
 	struct tx_desc *tx;
 	size_t offset = 0;
 	int rc, i;
 
 	max_msg_size = is_client() ? MSG_REQ_MAX_SIZE : MSG_REP_MAX_SIZE;
 
-	rc = alloc_buffer(res->pd, max_msg_size * num_tx_descs,
-			  send_buf);
-	if (rc)
-		return rc;
-
 	tx = calloc(num_tx_descs, sizeof(struct tx_desc));
 	if (!tx) {
 		rc = -ENOMEM;
-		goto err_free_buf;
+		goto err_exit;
 	}
 
 	for (i = 0; i < num_tx_descs; i++, offset += max_msg_size) {
 		struct tx_desc *desc = &tx[i];
-		struct ibv_sge *sge = &desc->msg_sge;
-
-		rc = alloc_ind_buffer(send_buf, offset, max_msg_size,
-				      &desc->send_buf);
-		if (rc)
-			goto err_free_tx;
-
-		sge->addr = get_ind_buffer_addr(&desc->send_buf);
-		sge->length = get_ind_buffer_size(&desc->send_buf);
-		sge->lkey = get_ind_buffer_lkey(&desc->send_buf);
 
 		desc->sig_mr = create_sig_mr(res);
 		if (!desc->sig_mr) {
@@ -827,13 +659,11 @@ err_free_tx:
 	for (i--; i >= 0; i--) {
 		struct tx_desc *desc = &tx[i];
 
-		free_ind_buffer(&desc->send_buf);
 		if (desc->sig_mr)
 			mlx5dv_destroy_mkey(desc->sig_mr);
 	}
 	free(tx);
-err_free_buf:
-	free_buffer(send_buf);
+err_exit:
 	res->tx = NULL;
 	return rc;
 }
@@ -848,33 +678,32 @@ static void destroy_tx(struct resources *res)
 
 			if (desc->sig_mr)
 				mlx5dv_destroy_mkey(desc->sig_mr);
-			free_ind_buffer(&desc->send_buf);
 		}
 		free(res->tx);
 		res->tx = NULL;
 		res->num_tx_descs = 0;
 	}
-
-	free_buffer(&res->send_buf);
 }
 
 static int create_tasks(struct resources *res)
 {
 	struct task *tasks;
-	struct buffer *data_buf = &res->data_buf;
-	size_t data_buf_size;
+	size_t task_data_size;
 	int num_tasks = conf.queue_depth;
 	size_t offset = 0;
 	int i, qe, rc;
 
 	if (is_client())
-		data_buf_size = conf.nb * SERVER_DATA_SIZE;
+		task_data_size = conf.nb * SERVER_DATA_SIZE;
 	else
-		data_buf_size = conf.nb * (SERVER_DATA_SIZE + PI_SIZE);
+		task_data_size = conf.nb * (SERVER_DATA_SIZE + PI_SIZE);
 
-	rc = alloc_buffer(res->pd, data_buf_size * num_tasks, data_buf);
-	if (rc)
-		return rc;
+	res->data_mr = alloc_mr(res->pd, task_data_size * num_tasks);
+	if (!res->data_mr)
+		return -ENOMEM;
+
+	res->data_buf = res->data_mr->addr;
+	res->data_buf_size = task_data_size * num_tasks;
 
 	tasks = calloc(num_tasks, sizeof(struct task));
 	if (!tasks) {
@@ -882,13 +711,12 @@ static int create_tasks(struct resources *res)
 		goto err_free_buf;
 	}
 
-	for (i = 0; i < num_tasks; i++, offset += data_buf_size) {
+	for (i = 0; i < num_tasks; i++, offset += task_data_size) {
 		struct task *task = &tasks[i];
 
-		rc = alloc_ind_buffer(data_buf, offset, data_buf_size,
-				      &task->data_buf);
-		if (rc)
-			goto err_free_tasks;
+		task->data_rkey = res->data_mr->rkey;
+		task->data_lkey = res->data_mr->lkey;
+		task->data = res->data_buf + offset;
 	}
 
 	res->tasks = tasks;
@@ -897,39 +725,36 @@ static int create_tasks(struct resources *res)
 	for (qe = 0; qe < conf.queue_depth; qe++) {
 		struct task *task = get_task(res, qe);
 		task->req_id = qe;
+
+		dbg("TASK[%lu]: data %p, lkey 0x%x, rkey 0x%x\n",
+		    task->req_id, task->data, task->data_lkey, task->data_rkey);
 	}
 	return 0;
-err_free_tasks:
-	for (i--; i >= 0; i--) {
-		struct task *task = &tasks[i];
-
-		free_ind_buffer(&task->data_buf);
-	}
-	free(tasks);
 err_free_buf:
-	free_buffer(data_buf);
+	free_mr(res->data_mr);
+	res->data_buf = NULL;
+	res->data_mr = NULL;
+	res->data_buf_size = 0;
 	return rc;
 }
 
 static void destroy_tasks(struct resources *res)
 {
-	int i;
-
 	if (res->tasks) {
-		for (i = 0; i < res->num_tasks; i++) {
-			free_ind_buffer(&res->tasks[i].data_buf);
-		}
 		free(res->tasks);
 		res->tasks = NULL;
 		res->num_tasks = 0;
 	}
-	free_buffer(&res->data_buf);
+	free_mr(res->data_mr);
+	res->data_buf = NULL;
+	res->data_mr = NULL;
+	res->data_buf_size = 0;
 }
 
 static void destroy_qp(struct ibv_qp *qp)
 {
 	if (qp && ibv_destroy_qp(qp))
-		fprintf(stderr, "failed to destroy QP 0x%x\n", qp->qp_num);
+		err("failed to destroy QP 0x%x\n", qp->qp_num);
 }
 
 static struct ibv_qp *create_qp(struct resources *res)
@@ -968,14 +793,15 @@ static struct ibv_qp *create_qp(struct resources *res)
 	return mlx5dv_create_qp(res->ib_ctx, &qp_init_attr, &mlx5_qp_attr);
 }
 
-int check_sig_mr(struct mlx5dv_mkey *mkey)
+int check_sig_mr(struct task *task, struct mlx5dv_mkey *mkey)
 {
 	struct mlx5dv_mkey_err err_info;
+	const char *sig_err = "";
 	int rc;
 
 	rc = mlx5dv_mkey_check(mkey, &err_info);
 	if (rc) {
-		fprintf(stderr, "check mr status failed\n");
+		err("check mr status failed\n");
 		return rc;
 	}
 
@@ -984,24 +810,23 @@ int check_sig_mr(struct mlx5dv_mkey *mkey)
 	case MLX5DV_MKEY_NO_ERR:
 		break;
 	case MLX5DV_MKEY_SIG_BLOCK_BAD_REFTAG:
-		fprintf(stderr, "bad block reftag error has been detected\n");
+		sig_err = "REF_TAG";
 		break;
 	case MLX5DV_MKEY_SIG_BLOCK_BAD_APPTAG:
-		fprintf(stderr, "bad block apptag error has been detected\n");
+		sig_err = "APP_TAG";
 		break;
 	case MLX5DV_MKEY_SIG_BLOCK_BAD_GUARD:
-		fprintf(stderr, "bad block guard error has been detected\n");
+		sig_err = "BLOCK_GUARD";
 		break;
 	default:
-		fprintf(stderr, "Unknown error has been detected\n");
-		break;
+		err("Unknown error has been detected\n");
+		return -1;
 	}
 
 	if (rc)
-		fprintf(stdout, "mr status: %s(%d) expected_value %lu "
-				"actual_value %lu offset %lu\n",
-			"SIG ERROR", rc, err_info.err.sig.expected_value,
-			err_info.err.sig.actual_value, err_info.err.sig.offset);
+		info("REQ[%lu]: SIG ERROR: %s: expected %lu, actual %lu, offset %lu\n",
+		     task->req_id, sig_err, err_info.err.sig.expected_value,
+		     err_info.err.sig.actual_value, err_info.err.sig.offset);
 
 	return rc;
 }
@@ -1028,206 +853,22 @@ static void print_async_event(struct ibv_context *ctx,
 			      struct ibv_async_event *event)
 {
 	switch (event->event_type) {
-	/* QP events */
-	case IBV_EVENT_QP_FATAL:
-		fprintf(stdout, "QP fatal event for QP with handle %p\n",
-			event->element.qp);
-		break;
-	case IBV_EVENT_QP_REQ_ERR:
-		fprintf(stdout, "QP Requestor error for QP with handle %p\n",
-			event->element.qp);
-		break;
-	case IBV_EVENT_QP_ACCESS_ERR:
-		fprintf(stdout, "QP access error event for QP with handle %p\n",
-			event->element.qp);
-		break;
-	case IBV_EVENT_COMM_EST:
-		fprintf(stdout,
-			"QP communication established event for QP with handle "
-			"%p\n",
-			event->element.qp);
-		break;
 	case IBV_EVENT_SQ_DRAINED:
-		fprintf(stdout,
-			"QP Send Queue drained event for QP with handle %p\n",
-			event->element.qp);
+		info("IBV_EVENT_SQ_DRAINED, QP 0x%x\n",
+		     event->element.qp->qp_num);
 		break;
-	case IBV_EVENT_PATH_MIG:
-		fprintf(
-		    stdout,
-		    "QP Path migration loaded event for QP with handle %p\n",
-		    event->element.qp);
-		break;
-	case IBV_EVENT_PATH_MIG_ERR:
-		fprintf(stdout,
-			"QP Path migration error event for QP with handle %p\n",
-			event->element.qp);
-		break;
-	case IBV_EVENT_QP_LAST_WQE_REACHED:
-		fprintf(stdout,
-			"QP last WQE reached event for QP with handle %p\n",
-			event->element.qp);
-		break;
-
-	/* CQ events */
-	case IBV_EVENT_CQ_ERR:
-		fprintf(stdout, "CQ error for CQ with handle %p\n",
-			event->element.cq);
-		break;
-
-	/* SRQ events */
-	case IBV_EVENT_SRQ_ERR:
-		fprintf(stdout, "SRQ error for SRQ with handle %p\n",
-			event->element.srq);
-		break;
-	case IBV_EVENT_SRQ_LIMIT_REACHED:
-		fprintf(stdout,
-			"SRQ limit reached event for SRQ with handle %p\n",
-			event->element.srq);
-		break;
-
-	/* Port events */
-	case IBV_EVENT_PORT_ACTIVE:
-		fprintf(stdout, "Port active event for port number %d\n",
-			event->element.port_num);
-		break;
-	case IBV_EVENT_PORT_ERR:
-		fprintf(stdout, "Port error event for port number %d\n",
-			event->element.port_num);
-		break;
-	case IBV_EVENT_LID_CHANGE:
-		fprintf(stdout, "LID change event for port number %d\n",
-			event->element.port_num);
-		break;
-	case IBV_EVENT_PKEY_CHANGE:
-		fprintf(stdout, "P_Key table change event for port number %d\n",
-			event->element.port_num);
-		break;
-	case IBV_EVENT_GID_CHANGE:
-		fprintf(stdout, "GID table change event for port number %d\n",
-			event->element.port_num);
-		break;
-	case IBV_EVENT_SM_CHANGE:
-		fprintf(stdout, "SM change event for port number %d\n",
-			event->element.port_num);
-		break;
-	case IBV_EVENT_CLIENT_REREGISTER:
-		fprintf(stdout, "Client reregister event for port number %d\n",
-			event->element.port_num);
-		break;
-
-	/* RDMA device events */
-	case IBV_EVENT_DEVICE_FATAL:
-		fprintf(stdout, "Fatal error event for device %s\n",
-			ibv_get_device_name(ctx->device));
-		break;
-
 	default:
-		fprintf(stdout, "Unknown event (%d)\n", event->event_type);
+		err("Unknown event (%d)\n", event->event_type);
 	}
 }
 
-/******************************************************************************
- * Function: poll_completion
- *
- * Input
- * res pointer to resources structure
- *
- * Output
- * none
- *
- * Returns
- * 0 on success, 1 on failure
- *
- * Description
- * Poll the completion queue for a single event. This function will continue to
- * poll the queue until MAX_POLL_CQ_TIMEOUT milliseconds have passed.
- *
- ******************************************************************************/
-static int poll_completion(struct resources *res)
-{
-	unsigned long start_time_msec;
-	unsigned long cur_time_msec;
-	struct timeval cur_time;
-	struct ibv_wc wc;
-	int poll_result;
-	int rc = 0;
-
-	/* poll the completion for a while before giving up of doing it .. */
-	gettimeofday(&cur_time, NULL);
-	start_time_msec = (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
-	do {
-		poll_result = ibv_poll_cq(res->cq, 1, &wc);
-		gettimeofday(&cur_time, NULL);
-		cur_time_msec =
-		    (cur_time.tv_sec * 1000) + (cur_time.tv_usec / 1000);
-
-		server_check_async_event(res);
-		if (sq_drained)
-			return 1;
-
-	} while ((poll_result == 0) &&
-		 ((cur_time_msec - start_time_msec) < MAX_POLL_CQ_TIMEOUT));
-	if (poll_result < 0) {
-		/* poll CQ failed */
-		fprintf(stderr, "poll CQ failed\n");
-		rc = 1;
-	} else if (poll_result == 0) {
-		/* the CQ is empty */
-		fprintf(stderr,
-			"completion wasn't found in the CQ after timeout\n");
-		/** rc = 1; */
-	} else {
-		/* CQE found */
-		/** fprintf( */
-		/**     stdout, */
-		/**     "completion was found in CQ with status 0x%x, opcode %u\n", */
-		/**     wc.status, wc.opcode); */
-		/* check the completion status (here we don't care about the
-		 * completion opcode */
-		if (wc.status != IBV_WC_SUCCESS) {
-			fprintf(stderr, "got bad completion with status: 0x%x, "
-					"vendor syndrome: 0x%x\n",
-				wc.status, wc.vendor_err);
-			rc = 1;
-		}
-	}
-	return rc;
-}
-
-static inline void init_send_wr(struct resources *res, uint64_t req_id,
-				uint64_t send_flags)
-{
-	struct tx_desc *desc = get_tx_desc(res, req_id);
-	struct ibv_send_wr *wr = next_send_wr(desc);
-
-	memset(wr, 0, sizeof(*wr));
-	wr->opcode = IBV_WR_SEND;
-	wr->send_flags = send_flags;
-	wr->sg_list = &desc->msg_sge;
-	wr->num_sge = 1;
-	wr->wr_id = req_id;
-}
-
-static inline int post_send(struct ibv_qp *qp, struct tx_desc *desc)
-{
-	struct ibv_send_wr *bad_wr;
-	int rc;
-
-	rc = ibv_post_send(qp, first_send_wr(desc), &bad_wr);
-	desc->next_wr_idx = 0;
-
-	return rc;
-}
-
-int configure_sig_mkey(struct resources *res,
-		       struct mlx5dv_sig_block_attr *sig_attr,
-		       struct task *task) {
+void configure_sig_mkey(struct resources *res,
+			struct mlx5dv_sig_block_attr *sig_attr,
+			struct task *task) {
 	struct ibv_qp *qp;
 	struct ibv_qp_ex *qpx;
 	struct mlx5dv_qp_ex *dv_qp;
 	struct mlx5dv_mkey *mkey;
-	uint64_t data_addr;
 	struct tx_desc *desc;
 	struct mlx5dv_mkey_conf_attr conf_attr = {};
 	struct ibv_sge sge;
@@ -1243,27 +884,19 @@ int configure_sig_mkey(struct resources *res,
 	qpx = ibv_qp_to_qp_ex(qp);
 	dv_qp = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
 
-	ibv_wr_start(qpx);
-	qpx->wr_id = 0;
-	qpx->wr_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
-
 	mlx5dv_wr_mkey_configure(dv_qp, mkey, 3, &conf_attr);
 	mlx5dv_wr_set_mkey_access_flags(dv_qp, access_flags);
 
-	data_addr = get_ind_buffer_addr(&task->data_buf);
-
-	sge.addr = data_addr;
+	sge.addr = (uintptr_t)task->data;
 	sge.length = conf.nb * (SERVER_DATA_SIZE + PI_SIZE);
-	sge.lkey = get_ind_buffer_lkey(&task->data_buf);
+	sge.lkey = task->data_lkey;
 
 	mlx5dv_wr_set_mkey_layout_list(dv_qp, 1, &sge);
 
 	mlx5dv_wr_set_mkey_sig_block(dv_qp, sig_attr);
-
-	return ibv_wr_complete(qpx);
 }
 
-static int reg_data_mrs(struct resources *res, struct task *task)
+static void reg_data_mrs(struct resources *res, struct task *task)
 {
 	union {
 		struct mlx5dv_sig_t10dif t10dif;
@@ -1277,22 +910,10 @@ static int reg_data_mrs(struct resources *res, struct task *task)
 			      MLX5DV_SIG_CHECK_T10DIF_APPTAG |
 			      MLX5DV_SIG_CHECK_T10DIF_REFTAG,
 	};
-	int rc;
 
 	set_sig_domain_t10dif_type3(&mem, &mem_sig);
 
-	rc = configure_sig_mkey(res, &sig_attr, task);
-	if (rc) {
-		fprintf(stderr, "configuring sig MR failed\n");
-		return rc;
-	}
-
-	rc = poll_completion(res);
-	if (rc) {
-		fprintf(stderr, "poll completion failed\n");
-	}
-
-	return rc;
+	configure_sig_mkey(res, &sig_attr, task);
 }
 
 /******************************************************************************
@@ -1319,21 +940,21 @@ static int resources_destroy(struct resources *res)
 	destroy_rx(res);
 	if (res->cq) {
 		if (ibv_destroy_cq(res->cq)) {
-			fprintf(stderr, "failed to destroy CQ\n");
+			err("failed to destroy CQ\n");
 			rc = 1;
 		}
 		res->cq = NULL;
 	}
 	if (res->pd) {
 		if (ibv_dealloc_pd(res->pd)) {
-			fprintf(stderr, "failed to deallocate PD\n");
+			err("failed to deallocate PD\n");
 			rc = 1;
 		}
 		res->pd = NULL;
 	}
 	if (res->ib_ctx) {
 		if (ibv_close_device(res->ib_ctx)) {
-			fprintf(stderr, "failed to close device context\n");
+			err("failed to close device context\n");
 			rc = 1;
 		}
 		res->ib_ctx = NULL;
@@ -1341,7 +962,7 @@ static int resources_destroy(struct resources *res)
 
 	if (res->sock >= 0) {
 		if (close(res->sock)) {
-			fprintf(stderr, "failed to close socket\n");
+			err("failed to close socket\n");
 			rc = 1;
 		}
 		res->sock = -1;
@@ -1358,9 +979,7 @@ int set_nonblock_async_event_fd(struct ibv_context *ctx)
 	rc = fcntl(ctx->async_fd, F_SETFL, flags | O_NONBLOCK);
 
 	if (rc)
-		fprintf(
-		    stderr,
-		    "failed to change file descriptor of async event queue\n");
+		err("failed to change file descriptor of async event queue\n");
 
 	return rc;
 }
@@ -1395,24 +1014,23 @@ static int resources_create(struct resources *res)
 
 	memset(res, 0, sizeof *res);
 
-	/* if client side */
 	if (is_client()) {
 		res->sock = sock_connect(conf.server_name, conf.tcp_port);
 		if (res->sock < 0) {
-			fprintf(stderr, "failed to establish TCP connection to "
-					"server %s, port %d\n",
-				conf.server_name, conf.tcp_port);
+			err("failed to establish TCP connection to "
+			    "server %s, port %d\n",
+			    conf.server_name, conf.tcp_port);
 			rc = -1;
 			goto resources_create_exit;
 		}
 	} else {
-		fprintf(stdout, "waiting on port %d for TCP connection\n",
+		info("waiting on port %d for TCP connection\n",
 			conf.tcp_port);
 		res->sock = sock_connect(NULL, conf.tcp_port);
 		if (res->sock < 0) {
-			fprintf(stderr, "failed to establish TCP connection "
-					"with client on port %d\n",
-				conf.tcp_port);
+			err("failed to establish TCP connection "
+			    "with client on port %d\n",
+			    conf.tcp_port);
 			rc = -1;
 			goto resources_create_exit;
 		}
@@ -1421,26 +1039,24 @@ static int resources_create(struct resources *res)
 	/* TCP connection was established, searching for IB devices in host */
 	dev_list = ibv_get_device_list(&num_devices);
 	if (!dev_list) {
-		fprintf(stderr, "failed to get IB devices list\n");
+		err("failed to get IB devices list\n");
 		rc = 1;
 		goto resources_create_exit;
 	}
 	/* if there isn't any IB device in host */
 	if (!num_devices) {
-		fprintf(stderr, "found %d device(s)\n", num_devices);
+		err("found no RDMA devices\n");
 		rc = 1;
 		goto resources_create_exit;
 	}
-	fprintf(stdout, "found %d device(s)\n", num_devices);
+	dbg("found %d device(s)\n", num_devices);
 	/* search for the specific device we want to work with */
 	for (i = 0; i < num_devices; i++) {
 		if (!conf.dev_name) {
 			conf.dev_name =
 			    strdup(ibv_get_device_name(dev_list[i]));
-			fprintf(
-			    stdout,
-			    "device not specified, using first one found: %s\n",
-			    conf.dev_name);
+			info("device not specified, using first one found: %s\n",
+			     conf.dev_name);
 		}
 		if (!strcmp(ibv_get_device_name(dev_list[i]), conf.dev_name)) {
 			ib_dev = dev_list[i];
@@ -1449,20 +1065,20 @@ static int resources_create(struct resources *res)
 	}
 	/* if the device wasn't found in host */
 	if (!ib_dev) {
-		fprintf(stderr, "IB device %s wasn't found\n", conf.dev_name);
+		err("IB device %s wasn't found\n", conf.dev_name);
 		rc = 1;
 		goto resources_create_exit;
 	}
 	/* get device handle */
-	if (mlx5dv_is_supported(ib_dev)) {
-		fprintf(stdout, "device %s support mlx5dv\n", conf.dev_name);
-		dv_attr.flags = MLX5DV_CONTEXT_FLAGS_DEVX;
-		res->ib_ctx = mlx5dv_open_device(ib_dev, &dv_attr);
-	} else {
-		res->ib_ctx = ibv_open_device(ib_dev);
+	if (!mlx5dv_is_supported(ib_dev)) {
+		err("device %s does not support mlx5dv\n", conf.dev_name);
+		rc = 1;
+		goto resources_create_exit;
 	}
+	dv_attr.flags = MLX5DV_CONTEXT_FLAGS_DEVX;
+	res->ib_ctx = mlx5dv_open_device(ib_dev, &dv_attr);
 	if (!res->ib_ctx) {
-		fprintf(stderr, "failed to open device %s errno %d\n",
+		err("failed to open device %s errno %d\n",
 			conf.dev_name, errno);
 		rc = 1;
 		goto resources_create_exit;
@@ -1479,7 +1095,7 @@ static int resources_create(struct resources *res)
 
 	/* get device capabilities */
 	if (ibv_query_device(res->ib_ctx, &dev_attr)) {
-		fprintf(stderr, "ibv_exp_query_device on device %s failed\n",
+		err("ibv_exp_query_device on device %s failed\n",
 			ibv_get_device_name(res->ib_ctx->device));
 		rc = 1;
 		goto resources_create_exit;
@@ -1487,15 +1103,14 @@ static int resources_create(struct resources *res)
 
 	/* query port properties */
 	if (ibv_query_port(res->ib_ctx, conf.ib_port, &res->port_attr)) {
-		fprintf(stderr, "ibv_query_port on port %u failed\n",
-			conf.ib_port);
+		err("ibv_query_port on port %u failed\n", conf.ib_port);
 		rc = 1;
 		goto resources_create_exit;
 	}
 	/* allocate Protection Domain */
 	res->pd = ibv_alloc_pd(res->ib_ctx);
 	if (!res->pd) {
-		fprintf(stderr, "ibv_alloc_pd failed\n");
+		err("ibv_alloc_pd: err %d\n", errno);
 		rc = 1;
 		goto resources_create_exit;
 	}
@@ -1503,31 +1118,33 @@ static int resources_create(struct resources *res)
 	/* number of send WRs + one recv WR */
 	res->cq = ibv_create_cq(res->ib_ctx, CQ_SIZE, NULL, NULL, 0);
 	if (!res->cq) {
-		fprintf(stderr, "failed to create CQ with %u entries\n",
-			CQ_SIZE);
+		err("failed to create CQ with %u entries\n", CQ_SIZE);
 		rc = 1;
 		goto resources_create_exit;
 	}
 
 	rc = create_tx(res);
 	if (rc) {
+		err("create_tx, err %d\n", rc);
 		goto resources_create_exit;
 	}
 	rc = create_rx(res);
 	if (rc) {
+		err("create_rx, err %d\n", rc);
 		goto resources_create_exit;
 	}
 	rc = create_tasks(res);
 	if (rc) {
+		err("create_tasks, err %d\n", rc);
 		goto resources_create_exit;
 	}
 
 	if (is_server())
-		fill_buffer(&res->data_buf);
+		fill_data_buffer(res->data_buf, res->data_buf_size);
 
 	res->qp = create_qp(res);
 	if (!res->qp) {
-		fprintf(stderr, "failed to create QP\n");
+		err("failed to create QP\n");
 		rc = 1;
 		goto resources_create_exit;
 	}
@@ -1572,7 +1189,7 @@ static int modify_qp_to_init(struct ibv_qp *qp)
 		IBV_QP_ACCESS_FLAGS;
 	rc = ibv_modify_qp(qp, &attr, flags);
 	if (rc)
-		fprintf(stderr, "failed to modify QP state to INIT\n");
+		err("failed to modify QP state to INIT, err %d\n", rc);
 	return rc;
 }
 
@@ -1603,7 +1220,7 @@ static int modify_qp_to_rtr(struct ibv_qp *qp, uint32_t remote_qpn,
 
 	memset(&attr, 0, sizeof(attr));
 	attr.qp_state = IBV_QPS_RTR;
-	attr.path_mtu = conf.mtu;
+	attr.path_mtu = IBV_MTU_1024;
 	attr.dest_qp_num = remote_qpn;
 	attr.rq_psn = 0;
 	attr.max_dest_rd_atomic = 1;
@@ -1627,7 +1244,7 @@ static int modify_qp_to_rtr(struct ibv_qp *qp, uint32_t remote_qpn,
 		IBV_QP_MIN_RNR_TIMER;
 	rc = ibv_modify_qp(qp, &attr, flags);
 	if (rc)
-		fprintf(stderr, "failed to modify QP state to RTR\n");
+		err("failed to modify QP state to RTR, err %d\n", rc);
 	return rc;
 }
 
@@ -1643,7 +1260,7 @@ static int modify_qp_to_err(struct ibv_qp *qp)
 
 	rc = ibv_modify_qp(qp, &attr, flags);
 	if (rc)
-		fprintf(stderr, "failed to modify QP state to RTR\n");
+		err("failed to modify QP state to RTR, err %d\n", rc);
 	return rc;
 }
 /******************************************************************************
@@ -1677,7 +1294,7 @@ static int modify_qp_to_rts(struct ibv_qp *qp)
 
 	rc = ibv_modify_qp(qp, &attr, flags);
 	if (rc)
-		fprintf(stderr, "failed to modify QP state to RTS, rc %d\n", rc);
+		err("failed to modify QP state to RTS, err %d\n", rc);
 	return rc;
 }
 
@@ -1692,7 +1309,7 @@ static int modify_qp_from_sqd_to_rts(struct ibv_qp *qp)
 
 	rc = ibv_modify_qp(qp, &attr, flags);
 	if (rc)
-		fprintf(stderr, "failed to modify QP state to RTS, rc %d\n", rc);
+		err("failed to modify QP state to RTS, err %d\n", rc);
 	return rc;
 }
 
@@ -1740,9 +1357,8 @@ static int connect_qp(struct resources *res)
 		rc = ibv_query_gid(res->ib_ctx, conf.ib_port, conf.gid_idx,
 				   &my_gid);
 		if (rc) {
-			fprintf(stderr,
-				"could not get gid for port %d, index %d\n",
-				conf.ib_port, conf.gid_idx);
+			err("could not get gid for port %d, index %d\n",
+			    conf.ib_port, conf.gid_idx);
 			return rc;
 		}
 	} else
@@ -1751,12 +1367,12 @@ static int connect_qp(struct resources *res)
 	local_con_data.qp_num = htonl(res->qp->qp_num);
 	local_con_data.lid = htons(res->port_attr.lid);
 	memcpy(local_con_data.gid, &my_gid, 16);
-	fprintf(stdout, "\nLocal LID = 0x%x\n", res->port_attr.lid);
+	info("\n");
+	info("Local LID = 0x%x\n", res->port_attr.lid);
 
 	if (sock_sync_data(res->sock, sizeof(struct cm_con_data_t),
 			   (char *)&local_con_data, (char *)&tmp_con_data)) {
-		fprintf(stderr,
-			"failed to exchange connection data between sides\n");
+		err("failed to exchange connection data between sides\n");
 		rc = 1;
 		goto connect_qp_exit;
 	}
@@ -1765,29 +1381,36 @@ static int connect_qp(struct resources *res)
 	memcpy(remote_con_data.gid, tmp_con_data.gid, 16);
 	/* save the remote side attributes, we will need it for the post SR */
 	res->remote_props = remote_con_data;
-	fprintf(stdout, "Remote LID = 0x%x\n", remote_con_data.lid);
-	fprintf(stdout, "Remote QP = { 0x%x }\n", remote_con_data.qp_num);
+	info("Remote LID = 0x%x\n", remote_con_data.lid);
+	info("Local QP = 0x%x\n", res->qp->qp_num);
+	info("Remote QP = 0x%x\n", remote_con_data.qp_num);
 
 	if (conf.gid_idx >= 0) {
-		uint8_t *p = remote_con_data.gid;
-		fprintf(stdout, "Remote GID = "
-				"%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%"
-				"02x:%02x:%02x:%02x:%02x:%02x:%02x\n",
-			p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8],
-			p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+		uint8_t *p = my_gid.raw;
+
+		info("Local GID = %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:"
+		     "%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x\n",
+		     p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8],
+		     p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+
+		p = remote_con_data.gid;
+		info("Remote GID = %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:"
+		     "%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x\n",
+		     p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8],
+		     p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
 	}
+	info("\n");
 
 	/* modify the QP to init */
 	rc = modify_qp_to_init(res->qp);
 	if (rc) {
-		fprintf(stderr, "change QP 0x%x state to INIT failed\n",
-			res->qp->qp_num);
+		err("change QP 0x%x state to INIT failed\n", res->qp->qp_num);
 		goto connect_qp_exit;
 	}
 
 	rc = post_recv_all(res);
 	if (rc) {
-		fprintf(stderr, "failed to post RR\n");
+		err("failed to post RR\n");
 		goto connect_qp_exit;
 	}
 
@@ -1795,19 +1418,16 @@ static int connect_qp(struct resources *res)
 	rc = modify_qp_to_rtr(res->qp, remote_con_data.qp_num,
 			      remote_con_data.lid, remote_con_data.gid);
 	if (rc) {
-		fprintf(
-		    stderr,
-		    "failed to modify QP 0x%x remote QP 0x%x state to RTR\n",
+		err("failed to modify QP 0x%x remote QP 0x%x state to RTR\n",
 		    res->qp->qp_num, remote_con_data.qp_num);
 		goto connect_qp_exit;
 	}
 	rc = modify_qp_to_rts(res->qp);
 	if (rc) {
-		fprintf(stderr, "failed to modify QP 0x%x state to RTS\n",
-			res->qp->qp_num);
+		err("failed to modify QP 0x%x state to RTS\n", res->qp->qp_num);
 		goto connect_qp_exit;
 	}
-	fprintf(stdout, "QP state was change to RTS\n");
+	dbg("QP state was change to RTS\n");
 
 	/* sync to make sure that both sides are in states that they can connect
 	 * to prevent packet loose
@@ -1816,7 +1436,7 @@ static int connect_qp(struct resources *res)
 			   &temp_char)) /* just send a dummy char back
 					   and forth */
 	{
-		fprintf(stderr, "sync error after QP are were moved to RTS\n");
+		err("sync error after QP are were moved to RTS\n");
 		rc = 1;
 	}
 connect_qp_exit:
@@ -1827,62 +1447,53 @@ static int client_send_req(struct resources *res,
 			   uint64_t req_id,
 			   enum msg_types type)
 {
-	struct tx_desc *desc;
 	struct task *task;
-	uint8_t *msg;
-	struct msg_req_hdr *hdr;
+	struct msg_req msg;
+	int iov_size = 1;
 	size_t msg_length;
-	struct iov *iov;
-	int iov_size;
-	struct ibv_sge *sge;
-
-	desc = get_tx_desc(res, req_id);
-	msg = get_ind_buffer_ptr(&desc->send_buf);
+	struct ibv_qp_ex *qpx = ibv_qp_to_qp_ex(get_qp(res));
 
 	switch (type) {
 	case MSG_TYPE_READ_REQ:
-	case MSG_TYPE_WRITE_REQ:
 	case MSG_TYPE_STOP_REQ:
 		break;
 	default:
 		return -EINVAL;
 	}
 
-	hdr = (struct msg_req_hdr *)msg;
-	msg += sizeof(*hdr);
-	msg_length = sizeof(*hdr);
+	msg.hdr.type = htons(type);
+	msg.hdr.id = htonll(req_id);
+	msg.hdr.iov_size = htons(iov_size);
 
-	hdr->type = htons(type);
-	hdr->id = htonll(req_id);
-	hdr->iov_size = htons(1);
-	hdr->inline_data_size = htonl(0);
+	msg_length = sizeof(msg.hdr);
 
 	if (MSG_TYPE_STOP_REQ != type) {
-		iov = (struct iov *)msg;
-
 		task = get_task(res, req_id);
 
-		iov->addr = htonll(get_ind_buffer_addr(&task->data_buf));
-		iov->length = htonl(conf.nb * SERVER_DATA_SIZE);
-		iov->rkey = htonl(get_ind_buffer_rkey(&task->data_buf));
-		iov_size = 1;
+		msg.iov[0].addr = htonll((uintptr_t)task->data);
+		msg.iov[0].length = htonl(conf.nb * SERVER_DATA_SIZE);
+		msg.iov[0].rkey = htonl(task->data_rkey);
 
-		msg_length += sizeof(*iov) * iov_size;
+		msg_length += sizeof(struct iov);
 	}
 
-	sge = &desc->msg_sge;
-	sge->addr = get_ind_buffer_addr(&desc->send_buf);
-	sge->length = msg_length;
-	sge->lkey = get_ind_buffer_lkey(&desc->send_buf);
+	ibv_wr_start(qpx);
+	qpx->wr_id = task->req_id;
+	qpx->wr_flags = IBV_SEND_SIGNALED;
 
-	init_send_wr(res, req_id, IBV_SEND_SIGNALED);
+	ibv_wr_send(qpx);
 
-	return post_send(get_qp(res), desc);
+	ibv_wr_set_inline_data(qpx, &msg, msg_length);
+
+	dbg("REQ[%lu]: SEND: addr 0x%p, length %zu\n",
+	    req_id, &msg, msg_length);
+
+	return ibv_wr_complete(qpx);
 }
 
 static int client(struct resources *res)
 {
-	int req, i, rc;
+	int req, i, rc, test_result;
 	uint64_t req_id;
 	enum msg_types req_type = MSG_TYPE_READ_REQ;
 	struct ibv_wc wc[MAX_WC_PER_POLL];
@@ -1902,99 +1513,106 @@ static int client(struct resources *res)
 
 	rc = clock_gettime(CLOCK_MONOTONIC_COARSE, &start_time);
 	if (rc) {
-		perror("clock_gettime");
+		err("clock_gettime: err %d", rc);
 		goto err_exit;
 	}
 
-	while (!stop) {
-		rc = ibv_poll_cq(res->cq, MAX_WC_PER_POLL, wc);
+	while (!stop && conf.iters != 0) {
+		int polled_comps;
+
+		polled_comps = ibv_poll_cq(res->cq, MAX_WC_PER_POLL, wc);
 		res->polls_counter++;
-		if (!rc)
+		if (!polled_comps)
 			continue;
-		if (rc < 0) {
-			perror("ibv_poll_cq");
+		if (polled_comps < 0) {
+			err("ibv_poll_cq: err %d\n", polled_comps);
+			rc = polled_comps;
 			break;
 		}
-		res->comps_counter += rc;
+		res->comps_counter += polled_comps;
 
-		for (i = 0; i < rc && !stop; ++i) {
-			int result;
+		for (i = 0; i < polled_comps && !stop; ++i) {
 
 			if (wc[i].status != IBV_WC_SUCCESS) {
-				fprintf(stderr, "failed wr_id %lu, opcode %d\n",
-					wc[i].wr_id, wc[i].opcode);
+				err("failed wr_id %lu, opcode %d\n", wc[i].wr_id,
+				    wc[i].opcode);
 				stop = true;
 				break;
 			}
-			req_id = wc[i].wr_id;
+
 			switch (wc[i].opcode) {
 			case IBV_WC_SEND:
-				/* ignore successfull send completions */
-				/** fprintf(stdout, "WC wr_id %lu, opcode SEND\n ", */
-				/**                 wc[i].wr_id); */
+				dbg("REQ[%lu]: complete\n", wc[i].wr_id);
 				break;
 			case IBV_WC_RECV:
-				/** fprintf(stdout, "WC wr_id %lu, opcode RECV\n ", */
-				/**                 wc[i].wr_id); */
-				desc = get_rx_desc(res, req_id);
+				dbg("WC: opcode RECV, wr_id %lu\n", wc[i].wr_id);
+				desc = get_rx_desc(res, wc[i].wr_id);
 
 				res->io_counter++;
+                                conf.iters = (conf.iters > 0) ? conf.iters - 1
+                                                              : conf.iters;
 
-				msg = get_ind_buffer_ptr(&desc->recv_buf);
+                                msg = desc->msg;
 				hdr = (struct msg_rep_hdr *)msg;
+				req_id = ntohll(hdr->id);
 				status = ntohs(hdr->status);
-				if (status == MSG_REP_STATUS_FAIL) {
-					fprintf(stdout, "Got failure response "
-							"with wr_id %lu\n",
-						ntohll(hdr->id));
-				}
 
-				result = post_recv(get_qp(res), desc);
-				if (result) {
-					fprintf(stdout, "WC wr_id %lu, opcode "
-							"RECV, post_recv "
-							"result %d\n",
-						wc[i].wr_id, result);
+				if (status == MSG_REP_STATUS_OK) {
+					dbg("REP[%lu]: received, status OK\n", req_id);
+				} else if (status == MSG_REP_STATUS_SIG_ERROR) {
+					info("REP[%lu]: received with status SIG_ERROR\n", req_id);
+				} else {
+					err("REP[%lu]: received, status UNKNOWN\n", req_id);
+					rc = -1;
 					stop = true;
 					break;
 				}
 
-				result = client_send_req(res, req_id, req_type);
-				if (result) {
-					fprintf(stdout, "WC wr_id %lu, opcode "
-							"RECV, client_send_req "
-							"result %d\n",
-						wc[i].wr_id, result);
+				rc = post_recv(get_qp(res), desc);
+				if (rc) {
+					err("post_recv: WC wr_id %lu, err %d\n",
+					    wc[i].wr_id, rc);
+					stop = true;
+					break;
+				}
+
+				rc = client_send_req(res, req_id, MSG_TYPE_READ_REQ);
+				if (rc) {
+					err("client_send_req: wr_id %lu, req_id %lu, err %d\n",
+					    wc[i].wr_id, req_id, rc);
 					stop = true;
 				}
 				break;
 			default:
-				fprintf(stderr, "unknown WC opcode %d\n",
-					wc[i].opcode);
+				err("unknown WC opcode %d\n", wc[i].opcode);
 				stop = true;
 			}
 		}
 	}
+	test_result = rc;
+
 	req_id = conf.queue_depth;
 	rc = client_send_req(res, req_id, MSG_TYPE_STOP_REQ);
 	if (rc) {
-		fprintf(stderr, "Failed to send stop request\n");
+		err("client_send_req: err %d\n", rc);
+		test_result = rc;
 	}
 	rc = clock_gettime(CLOCK_MONOTONIC_COARSE, &end_time);
 	if (rc) {
-		perror("clock_gettime");
+		err("clock_gettime: err %d\n", rc);
+		test_result = rc;
 		goto err_exit;
 	}
 	iops = (end_time.tv_sec - start_time.tv_sec) * 1000;
 	iops += (end_time.tv_nsec - start_time.tv_nsec) / 1000000;
 	if (iops)
 		iops = (res->io_counter * 1000) / iops;
-	fprintf(stdout, "IOps : %lu\n", iops);
+	info("IOps : %lu\n", iops);
 
 err_exit:
 	flush_qp(res);
 
-	return rc;
+	return test_result;
 }
 
 static struct task *server_init_task(struct resources *res,
@@ -2010,8 +1628,7 @@ static struct task *server_init_task(struct resources *res,
 	int i;
 
 	if (msg_len < sizeof(*hdr)) {
-		fprintf(stderr, "received message is too short, length %lu\n",
-			msg_len);
+		err("received message is too short, length %lu\n", msg_len);
 		return NULL;
 	}
 
@@ -2023,54 +1640,43 @@ static struct task *server_init_task(struct resources *res,
 
 	if (req_type == MSG_TYPE_STOP_REQ) {
 		stop = true;
-		fprintf(stdout, "Got stop request\n");
+		dbg("received MSG_TYPE_STOP_REQ\n");
 		return NULL;
 	}
 
 	req_id = ntohll(hdr->id);
 	if (req_id > conf.queue_depth) {
-		fprintf(stderr, "invalid request id(%lu) qd %d\n", req_id,
-			conf.queue_depth);
+		err("invalid request id(%lu) qd %d\n", req_id, conf.queue_depth);
 		return NULL;
 	}
 	task = get_task(res, req_id);
 	if (task->status != TASK_STATUS_FREE) {
-		fprintf(stderr, "request id(%lu) is busy\n", req_id);
+		err("request id(%lu) is busy\n", req_id);
 		return NULL;
 	}
 
 	switch (req_type) {
-	case MSG_TYPE_WRITE_REQ:
-		task->type = TASK_TYPE_WRITE;
-		break;
 	case MSG_TYPE_READ_REQ:
-		task->type = TASK_TYPE_READ;
 		break;
 	default:
-		fprintf(stderr, "unknown request type(%u)\n", req_type);
-		return NULL;
-	}
-
-	if (hdr->inline_data_size) {
-		fprintf(stderr, "inline data is not implemented\n");
+		err("unknown request type(%u)\n", req_type);
 		return NULL;
 	}
 
 	iov_size = ntohs(hdr->iov_size);
 	if (iov_size > IOV_MAX_SIZE) {
-		fprintf(stderr, "invalid iov_size %u\n", iov_size);
+		err("invalid iov_size %u\n", iov_size);
 		return NULL;
 	}
 	task->iov_size = iov_size;
 
 	if (msg_len < (sizeof(*iov) * iov_size)) {
-		fprintf(stderr, "invalid message, iov_size\n");
+		err("invalid message, iov_size\n");
 		return NULL;
 	}
 	iov = (struct iov *)msg;
 	msg_len -= sizeof(*iov) * iov_size;
 
-	task->data_len = 0;
 	for (i = 0; i < iov_size; i++) {
 		struct iov *src = &iov[i];
 		struct iov *dst = &task->iov[i];
@@ -2078,112 +1684,104 @@ static struct task *server_init_task(struct resources *res,
 		dst->addr = ntohll(src->addr);
 		dst->length = ntohl(src->length);
 		dst->rkey = ntohl(src->rkey);
-		task->data_len += dst->length;
 	}
 	task->status = TASK_STATUS_INITED;
 
 	return task;
 }
 
-static inline int server_send_reply(struct resources *res,
-				    struct task *task,
-				    enum msg_rep_status status)
+static void server_send_reply(struct ibv_qp_ex *qpx,
+			      struct task *task,
+			      enum msg_rep_status status)
 {
-	struct tx_desc *desc;
-	enum msg_types reply_type;
-	uint8_t *msg;
-	struct msg_rep_hdr *hdr;
-	size_t msg_length;
-	struct ibv_sge *sge;
+	struct msg_rep msg = {
+		.hdr = {
+			.type = htons(MSG_TYPE_READ_REP),
+			.id = htonll(task->req_id),
+			.status = htons(status),
+		},
+	};
 
-	desc = get_tx_desc(res, task->req_id);
-
-	switch (task->type) {
-	case TASK_TYPE_READ:
-		reply_type = MSG_TYPE_READ_REP;
-		break;
-	case TASK_TYPE_WRITE:
-		reply_type = MSG_TYPE_WRITE_REP;
-		break;
-	default:
-		fprintf(stderr, "unknown task type %d\n", task->type);
-		return -EINVAL;
-	}
-
-	msg = get_ind_buffer_ptr(&desc->send_buf);
-	hdr = (struct msg_rep_hdr *)msg;
-	msg += sizeof(*hdr);
-	msg_length = sizeof(*hdr);
-
-	hdr->type = htons(reply_type);
-	hdr->id = htonll(task->req_id);
-	hdr->status = htons(status);
-	hdr->inline_data_size = htonl(0);
-
-	sge = &desc->msg_sge;
-	sge->addr = get_ind_buffer_addr(&desc->send_buf);
-	sge->length = msg_length;
-	sge->lkey = get_ind_buffer_lkey(&desc->send_buf);
-
-	init_send_wr(res, task->req_id, IBV_SEND_SIGNALED);
-	task->status = TASK_STATUS_FREE;
-
-	return post_send(get_qp(res), desc);
+	ibv_wr_send(qpx);
+	ibv_wr_set_inline_data(qpx, &msg, sizeof(msg));
 }
 
+static int server_post_send_reply(struct resources *res,
+				  struct task *task,
+				  enum msg_rep_status status)
+{
+	struct ibv_qp_ex *qpx = ibv_qp_to_qp_ex(get_qp(res));
+
+	ibv_wr_start(qpx);
+
+	qpx->wr_id = task->req_id;
+	qpx->wr_flags = IBV_SEND_SIGNALED;
+
+	server_send_reply(qpx, task, status);
+
+	return ibv_wr_complete(qpx);
+}
+
+
 static void server_rdma_write(struct resources *res, struct task *task) {
-	struct tx_desc *desc = get_tx_desc(res, task->req_id);
-	struct ibv_send_wr *wr = next_send_wr(desc);
-	struct ibv_sge *sge = &desc->sge;
+	struct ibv_qp_ex *qpx;
+	struct tx_desc *desc;
+	uint32_t rkey;
+	uint64_t remote_addr;
+	uint32_t lkey;
+	uint64_t addr;
+	uint32_t length;
 
-	sge->addr = 0;
-	/* length on wire domain */
-	sge->length = conf.nb * SERVER_DATA_SIZE;
-	sge->lkey = desc->sig_mr->lkey;
+	qpx = ibv_qp_to_qp_ex(get_qp(res));
+	desc = get_tx_desc(res, task->req_id);
 
-	/** fill_wr: */
-	memset(wr, 0, sizeof(*wr));
-	wr->sg_list = sge;
-	wr->num_sge = 1;
-	wr->opcode = IBV_WR_RDMA_WRITE;
-	wr->wr_id = task->req_id;
-	wr->wr.rdma.remote_addr = task->iov[0].addr;
-	wr->wr.rdma.rkey = task->iov[0].rkey;
+	rkey = task->iov[0].rkey;
+	remote_addr = task->iov[0].addr;
+
+	ibv_wr_rdma_write(qpx, rkey, remote_addr);
+
+	lkey = desc->sig_mr->lkey;
+	addr = 0; // offset in sig_mr
+	// length of the data on wire domain
+	length = conf.nb * SERVER_DATA_SIZE;
+
+	ibv_wr_set_sge(qpx, lkey, addr, length);
+
+	dbg("REQ[%lu]: RDMA_WRITE: remote_addr 0x%lx, rkey 0x%x, "
+	    "lkey 0x%x, addr 0x%lx, length %u\n",
+	    task->req_id, remote_addr, rkey, lkey, addr, length);
 }
 
 static inline int server_handle_read_task(struct resources *res,
 					  struct task *task)
 {
-	int rc;
+	struct ibv_qp_ex *qpx;
 
-	rc = reg_data_mrs(res, task);
-	if (rc) {
-		if (sq_drained) {
-			task->status = TASK_STATUS_FREE;
-			/** fprintf(stderr, "failed to reg mr due to sq_drained %lu\n", task->req_id); */
-			return 0;
-		}
-		fprintf(stderr, "failed to reg mr without sq_drained %lu\n", task->req_id);
-		return rc;
-	}
+	qpx = ibv_qp_to_qp_ex(get_qp(res));
+
+	ibv_wr_start(qpx);
+
+	qpx->wr_id = task->req_id;
+	qpx->wr_flags = IBV_SEND_INLINE;
+
+	reg_data_mrs(res, task);
+
+	qpx->wr_flags = 0;
 
 	server_rdma_write(res, task);
 
-	/* send reply with rdma write */
-	return server_send_reply(res, task, MSG_REP_STATUS_OK);
-}
+	qpx->wr_flags = IBV_SEND_SIGNALED | IBV_SEND_FENCE;
+	server_send_reply(qpx, task, MSG_REP_STATUS_OK);
+	task->status = TASK_STATUS_REPLY_SENT;
 
-static inline int server_handle_write_task(struct resources *res,
-					   struct task *task)
-{
-	fprintf(stderr, "write task is not implemented\n");
+	dbg("REP[%lu]: send, status OK\n", task->req_id);
 
-	return -1;
+	return ibv_wr_complete(qpx);
 }
 
 static inline int server_handle_async_event(struct resources *res)
 {
-	int i, wr_num, rc = 0;
+	int i, canceled_wrs;
 	struct ibv_qp *qp;
 	struct task *task;
 
@@ -2197,54 +1795,28 @@ static inline int server_handle_async_event(struct resources *res)
 	dv_qp = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
 
 	for (i = 0; i < conf.queue_depth; i++) {
+		task = get_task(res, i);
+		if (task->status != TASK_STATUS_REPLY_SENT)
+			/* Skip non-active tasks */
+			continue;
+
 		desc = get_tx_desc(res, i);
-		if (check_sig_mr(desc->sig_mr)) {
-			wr_num = mlx5dv_qp_cancel_posted_send_wrs(dv_qp, i);
-			if (wr_num) {
-				task = get_task(res, i);
-				task->status =
-				    TASK_STATUS_WR_CANCELED_WITH_ERR;
+		if (check_sig_mr(task, desc->sig_mr)) {
+			/* Cancel SEND WR with reply OK, if signature error was detected */
+			canceled_wrs = mlx5dv_qp_cancel_posted_send_wrs(dv_qp, task->req_id);
+			if (canceled_wrs < 0) {
+				err("mlx5dv_qp_cancel_posted_send_wrs: err %d\n", canceled_wrs);
+				return canceled_wrs;
+			} else {
+				/* Mark the task as canceled */
+				info("REQ[%lu]: cancel wrs %d\n", task->req_id, canceled_wrs);
+				task->status = TASK_STATUS_WR_CANCELED_WITH_SIG_ERR;
 			}
 		}
 	}
-	modify_qp_from_sqd_to_rts(qp);
 
-	sq_drained = false;
-
-	return rc;
-}
-
-static inline int server_check_async_event(struct resources *res)
-{
-	int rc = 0;
-	struct ibv_async_event event;
-	rc = ibv_get_async_event(res->ib_ctx, &event);
-	if (rc) {
-		return -1;
-	}
-	print_async_event(res->ib_ctx, &event);
-	if (IBV_EVENT_SQ_DRAINED == event.event_type) {
-		sq_drained = true;
-	}
-	ibv_ack_async_event(&event);
-
-	return rc;
-}
-
-static inline int server_handle_rdma_write_comp(struct resources *res,
-						struct ibv_wc *wc)
-{
-	struct tx_desc *desc = get_tx_desc(res, wc->wr_id);
-	struct task *task = get_task(res, wc->wr_id);
-	int rc = 0;
-	enum msg_rep_status sig_status;
-
-	rc = check_sig_mr(desc->sig_mr);
-
-	sig_status = rc ? MSG_REP_STATUS_FAIL : MSG_REP_STATUS_OK;
-	rc = server_send_reply(res, task, sig_status);
-
-	return 0;
+	/* Modify the QP to RTS state, to continue SEND WRs processing */
+	return modify_qp_from_sqd_to_rts(qp);
 }
 
 static inline int server_handle_request(struct resources *res,
@@ -2256,146 +1828,176 @@ static inline int server_handle_request(struct resources *res,
 	unsigned msg_len;
 	int rc;
 
-	if (sq_drained) {
-		// In this example, only 1 QP is uesed, 
-		// qp is now in SQ_DRAINED status,
-		// traffic should be stopped.
-		fprintf(stderr, "do not send data on %lu when SQD\n",
-			wc->wr_id);
-		return 0;
-	}
-
 	desc = get_rx_desc(res, wc->wr_id);
-	msg = get_ind_buffer_ptr(&desc->recv_buf);
+	msg = desc->msg;
 	msg_len = wc->byte_len;
 
 	task = server_init_task(res, msg, msg_len);
 	if (!task)
-		return -1;
+		return stop ? 0 : -1;
 
+	dbg("REQ[%lu]: received\n", task->req_id);
 	rc = post_recv(get_qp(res), desc);
 	if (rc)
 		return -1;
 
-	switch (task->type) {
-	case TASK_TYPE_READ:
-		rc = server_handle_read_task(res, task);
+	return server_handle_read_task(res, task);
+}
+
+static inline int server_handle_wc(struct resources *res, struct ibv_wc *wc)
+{
+	int rc = 0;
+	struct task *task;
+
+	if (wc->status != IBV_WC_SUCCESS) {
+		err("failed WR id %lu, opcode %d\n", wc->wr_id, wc->opcode);
+		return -1;
+	}
+
+	switch (wc->opcode) {
+	case IBV_WC_RDMA_READ:
+	case IBV_WC_RDMA_WRITE:
+	case IBV_WC_DRIVER1:
+		err("unexpected completion for non-signal WR, wr_id %lu, opcode %d\n",
+		    wc->wr_id, wc->opcode);
+		rc = -1;
 		break;
-	case TASK_TYPE_WRITE:
-		rc = server_handle_write_task(res, task);
+	case IBV_WC_SEND:
+		task = get_task(res, wc->wr_id);
+		if (task->status != TASK_STATUS_WR_CANCELED_WITH_SIG_ERR) {
+			task->status = TASK_STATUS_FREE;
+			dbg("REP[%lu]: completed\n", task->req_id);
+		} else {
+			info("REP[%lu]: canceled reply with status OK\n", task->req_id);
+			info("REP[%lu]: send reply with status SIG_ERROR\n", task->req_id);
+			task->status = TASK_STATUS_REPLY_SENT;
+			rc = server_post_send_reply(res, task, MSG_REP_STATUS_SIG_ERROR);
+			if (rc)
+				err("server_post_send_reply: err %d\n", rc);
+		}
+		break;
+	case IBV_WC_RECV:
+		rc = server_handle_request(res, wc);
+		if (rc)
+			err("server_handle_request: err %d\n", rc);
 		break;
 	default:
+		err("unknown WC opcode %d\n", wc->opcode);
 		rc = -1;
 	}
 
 	return rc;
 }
 
-static inline int server_handle_wc(struct resources *res, struct ibv_wc *wc)
+static inline int server_check_sqd_event(struct resources *res)
 {
-	int rc = 0;
-	struct task *task = get_task(res, wc->wr_id);
+	struct ibv_async_event event;
+	int rc;
 
-	if (wc->status != IBV_WC_SUCCESS) {
-		fprintf(stderr, "failed WR id %lu, opcode %d\n", wc->wr_id,
-			wc->opcode);
-		return -1;
-	}
+	rc = ibv_get_async_event(res->ib_ctx, &event);
+	if (rc)
+		return (errno == EAGAIN) ? 0 : -1;
 
-	switch (task->status) {
-	case TASK_STATUS_WR_CANCELED_WITH_ERR:
-		fprintf(
-		    stdout,
-		    "wc opcode %d req_id %lu send reply with error response\n",
-		    wc->opcode, task->req_id);
-		server_send_reply(res, task, MSG_REP_STATUS_FAIL);
-		return 0;
-	default:
-		break;
+	print_async_event(res->ib_ctx, &event);
+	if (IBV_EVENT_SQ_DRAINED == event.event_type) {
+		 rc = 1;
 	}
-
-	switch (wc->opcode) {
-	case IBV_WC_RDMA_READ:
-		/** fprintf(stdout, "WC wr_id %lu, opcode %d\n", */
-		/**         wc->wr_id, wc->opcode); */
-		break;
-	case IBV_WC_RDMA_WRITE:
-		/** fprintf(stdout, "WC wr_id %lu, opcode %d\n", */
-		/**         wc->wr_id, wc->opcode); */
-		rc = server_handle_rdma_write_comp(res, wc);
-		break;
-	case IBV_WC_SEND:
-		/* ignore successfull send completions */
-		/** fprintf(stdout, "WC wr_id %lu, opcode SEND\n", */
-		/**         wc->wr_id); */
-		break;
-	case IBV_WC_RECV:
-		/** fprintf(stdout, "WC wr_id %lu, opcode RECV(%d), status 0x%x\n", */
-		/**         wc->wr_id, wc->opcode, wc->status); */
-		rc = server_handle_request(res, wc);
-		break;
-	case IBV_WC_DRIVER1:
-		// It's expected when mkey_configure() with the signal flag, or
-		/** fprintf(stdout, "WC wr_id %lu, opcode %d\n", */
-		/**         wc->wr_id, wc->opcode); */
-		break;
-	default:
-		fprintf(stderr, "unknown WC opcode %d\n", wc->opcode);
-		rc = -1;
-	}
+	ibv_ack_async_event(&event);
 
 	return rc;
 }
 
 static int server(struct resources *res) {
 	struct ibv_wc wc[MAX_WC_PER_POLL];
-	int rc, i, count = CQ_SIZE;
+	int polled_comps;
+	/* The number of completions we must process before handle SQD event. */
+	int pending_comps;
+	int i;
+	int rc = 0;
 	bool first;
+	int sq_drained = 0; /* Is there a not-handled SQD event? */
 	struct timespec start_ts, end_ts, first_ts;
 
 	while (!stop) {
-		server_check_async_event(res);
-		rc = ibv_poll_cq(res->cq, MAX_WC_PER_POLL, wc);
-		res->polls_counter++;
-		if (!rc) {
-			// 1. got SQ Drained event, poll all pending CQ
-			// 2. cancel WR with signature error
-			// 3. change QP to RTS
-			if (sq_drained) {
-				server_handle_async_event(res);
-				count = CQ_SIZE;
+		if (!sq_drained) {
+			/* Check for a new SQD event */
+			sq_drained = server_check_sqd_event(res);
+			if (sq_drained < 0) {
+				err("server_check_sqd_event failed\n");
+				rc = sq_drained;
+				break;
 			}
-			continue;
-		}
 
-		if (rc < 0) {
-			perror("ibv_poll_cq");
+			if (sq_drained) {
+				/*
+				 * Got a new SQD event. Need to handle it.
+				 *
+				 * Firstly, we need to poll and process all
+				 * completions produced before the SQD event.
+				 * Let's assume the worst case: the CQ is full,
+				 * and we must process CQ_SIZE completions.
+				 */
+				pending_comps = CQ_SIZE;
+			}
+		}
+		polled_comps = ibv_poll_cq(res->cq, MAX_WC_PER_POLL, wc);
+		res->polls_counter++;
+		if (polled_comps < 0) {
+			err("ibv_poll_cq failed\n");
+			rc = polled_comps;
 			break;
 		}
 
-		if (sq_drained) {
-			// 1. got SQ Drained event, poll all pending CQ
-			count -= rc;
-		}
-		if (sq_drained && count <= 0) {
-			// 2. cancel WR with signature error
-			// 3. change QP to RTS
-			server_handle_async_event(res);
-			count = CQ_SIZE;
+		if (polled_comps == 0) {
+			if (!sq_drained)
+				continue;
+			/*
+			 * The CQ is empty. We can handle the SQD
+			 * event immediately.
+			 */
+			pending_comps = 0;
 		}
 
-		res->comps_counter += rc;
+		if (sq_drained) {
+			if (polled_comps == MAX_WC_PER_POLL)
+				pending_comps -= polled_comps;
+			else
+				/*
+				 * (polled_comps < MAX_WC_PER_POLL)
+				 * All pendind completions were polled.
+				 * We can handle the SQD after processing
+				 * the polled completions.
+				 */
+				pending_comps = 0;
+		}
+
+		res->comps_counter += polled_comps;
 		clock_gettime(CLOCK_MONOTONIC, &start_ts);
 		if (!first) {
 			first_ts = start_ts;
 			first = true;
 		}
-		for (i = 0; i < rc; ++i) {
-			if (0 != server_handle_wc(res, &wc[i])) {
+
+		/* Handle all polled completions */
+		for (i = 0; i < polled_comps; ++i) {
+			rc = server_handle_wc(res, &wc[i]);
+			if (rc) {
+				err("server_handle_wc, err %d\n", rc);
 				stop = true;
 				break;
 			}
 		}
+
+		if (sq_drained && pending_comps <= 0) {
+			rc = server_handle_async_event(res);
+			if (rc) {
+				err("server_handle_async_event, err %d\n", rc);
+				stop = true;
+				break;
+			}
+			sq_drained = false;
+		}
+
 		clock_gettime(CLOCK_MONOTONIC, &end_ts);
 		res->busy_time +=
 		    (end_ts.tv_sec - start_ts.tv_sec) * 1000000000 +
@@ -2408,25 +2010,24 @@ static int server(struct resources *res) {
 
 	flush_qp(res);
 
-	return 0;
+	return rc;
 }
 
 static void print_config(void) {
-	fprintf(stdout, " ------------------------------------------------\n");
-	fprintf(stdout, " Device name : \"%s\"\n", conf.dev_name);
-	fprintf(stdout, " IB port : %u\n", conf.ib_port);
+	info(" ------------------------------------------------\n");
+	info(" Device name : \"%s\"\n", conf.dev_name);
+	info(" IB port : %u\n", conf.ib_port);
 	if (conf.server_name)
-		fprintf(stdout, " IP : %s\n", conf.server_name);
+		info(" IP : %s\n", conf.server_name);
 
-	fprintf(stdout, " TCP port : %u\n", conf.tcp_port);
+	info(" TCP port : %u\n", conf.tcp_port);
 	if (conf.gid_idx >= 0)
-		fprintf(stdout, " GID index : %u\n", conf.gid_idx);
+		info(" GID index : %u\n", conf.gid_idx);
 
-	fprintf(stdout, " Block size : %u\n", SERVER_DATA_SIZE);
-	fprintf(stdout, " I/O size : %d\n", conf.nb * SERVER_DATA_SIZE);
-	fprintf(stdout, " Queue depth : %d\n", conf.queue_depth);
-	fprintf(stdout,
-		" ------------------------------------------------\n\n");
+	info(" Block size : %u\n", SERVER_DATA_SIZE);
+	info(" I/O size : %d\n", conf.nb * SERVER_DATA_SIZE);
+	info(" Queue depth : %d\n", conf.queue_depth);
+	info(" ------------------------------------------------\n\n");
 }
 /******************************************************************************
  * Function: usage
@@ -2445,30 +2046,22 @@ static void print_config(void) {
  ******************************************************************************/
 
 static void usage(const char *argv0) {
-	fprintf(stdout, "Usage:\n");
-	fprintf(stdout, " %s start a server and wait for connection\n", argv0);
-	fprintf(stdout, " %s <host> connect to server at <host>\n", argv0);
-	fprintf(stdout, "\n");
-	fprintf(stdout, "Options:\n");
-	fprintf(stdout, " -h, --help                   print this message\n");
-	fprintf(stdout, " -p, --port <port>            listen on/connect to "
-			"port <port> (default 18515)\n");
-	fprintf(stdout, " -d, --ib-dev <dev>           use IB device <dev> "
-			"(default first device found)\n");
-	fprintf(stdout, " -i, --ib-port <port>         use port <port> of IB "
-			"device (default 1)\n");
-	fprintf(stdout,
-		" -g, --gid-idx <gid index>    gid index to be used in GRH "
-		"(default not used)\n");
-	fprintf(stdout, " -n, --number-of-blocks <NB>  Number of blocks per "
-			"RDMA operation (default 8)\n");
-	fprintf(stdout, " -q, --queue-depth <num>      number of simultaneous "
-			"requests per QP"
-			" that a client can send to the server.\n");
-	fprintf(stdout, " -t, --test-time <seconds>    test duration in "
-			"seconds (default 10)\n");
-	fprintf(stdout,
-		" -m, --mtu <1024|2048|4096>   set MTU (default 1024).\n");
+	info("Usage:\n");
+	info(" %s start a server and wait for connection\n", argv0);
+	info(" %s <host> connect to server at <host>\n", argv0);
+	info("\n");
+	info("Options:\n");
+	info(" -h, --help                   print this message\n");
+	info(" -p, --port <port>            listen on/connect to port <port> (default 18515)\n");
+	info(" -d, --ib-dev <dev>           use IB device <dev> (default first device found)\n");
+	info(" -i, --ib-port <port>         use port <port> of IB device (default 1)\n");
+	info(" -g, --gid-idx <gid index>    gid index to be used in GRH (default not used)\n");
+	info(" -n, --number-of-blocks <NB>  Number of blocks per RDMA operation (default 8)\n");
+	info(" -q, --queue-depth <num>      number of simultaneous requests per QP that "
+					   "a client can send to the server.\n");
+	info(" -t, --time <num>             stop after <num> seconds (default 10)\n");
+	info(" -c, --iters <num>            stop after <num> iterations (default unlimited)\n");
+	info(" -l, --log-level <lvl>        0 - ERROR, 1 - INFO, 2 - DEBUG\n");
 }
 
 /******************************************************************************
@@ -2490,7 +2083,6 @@ static void usage(const char *argv0) {
 int main(int argc, char *argv[]) 
 {
 	struct resources res;
-	unsigned long mtu;
 	int rc = 1;
 
 	/* parse the command line parameters */
@@ -2505,11 +2097,12 @@ int main(int argc, char *argv[])
 			{ .name = "number-of-blocks",	.has_arg = 1, .val = 'n' },
 			{ .name = "queue-depth",	.has_arg = 1, .val = 'q' },
 			{ .name = "time",		.has_arg = 1, .val = 't' },
-			{ .name = "mtu",		.has_arg = 1, .val = 'm' },
+			{ .name = "iters",		.has_arg = 1, .val = 'c' },
+			{ .name = "log-level",		.has_arg = 1, .val = 'l' },
 			{ .name = NULL,			.has_arg = 0, .val = '\0' }
 		};
 
-		c = getopt_long(argc, argv, "hp:d:i:g:n:s:q:t:m", long_options,
+		c = getopt_long(argc, argv, "hp:d:i:g:n:q:t:c:l:", long_options,
 				NULL);
 		if (c == -1)
 			break;
@@ -2558,24 +2151,19 @@ int main(int argc, char *argv[])
 				return 1;
 			}
 			break;
-		case 'm':
-			mtu = strtoul(optarg, NULL, 0);
-			switch (mtu) {
-			case 1024:
-				conf.mtu = IBV_MTU_1024;
-				break;
-			case 2048:
-				conf.mtu = IBV_MTU_2048;
-				break;
-			case 4096:
-				conf.mtu = IBV_MTU_4096;
-				break;
-			default:
-				fprintf(stderr, "%s is not a valid MTU\n",
-					optarg);
+		case 'c':
+			conf.iters = strtoul(optarg, NULL, 0);
+			if (conf.iters < 0) {
+				usage(argv[0]);
 				return 1;
 			}
-			/** conf.ignore_trans_crc = strtoul(optarg, NULL, 0); */
+			break;
+		case 'l':
+			log_lvl = strtoul(optarg, NULL, 0);
+			if (log_lvl < 0) {
+				usage(argv[0]);
+				return 1;
+			}
 			break;
 		default:
 			usage(argv[0]);
@@ -2594,12 +2182,12 @@ int main(int argc, char *argv[])
 	print_config();
 
 	if (resources_create(&res)) {
-		fprintf(stderr, "failed to create resources\n");
+		err("failed to create resources\n");
 		goto main_exit;
 	}
 
 	if (connect_qp(&res)) {
-		fprintf(stderr, "failed to connect QP\n");
+		err("failed to connect QP\n");
 		goto main_exit;
 	}
 	if (set_signal_handler()) {
@@ -2623,12 +2211,13 @@ int main(int argc, char *argv[])
 		res.comps_counter = 1;
 	}
 
-	fprintf(stdout, "Polls %lu, completions %lu, comps/poll %.1f\n",
-		res.polls_counter, res.comps_counter,
-		(double)res.comps_counter / res.polls_counter);
+	info("\n");
+	info("Polls %lu, completions %lu, comps/poll %.1f\n",
+	     res.polls_counter, res.comps_counter,
+	     (double)res.comps_counter / res.polls_counter);
 	if (!is_client()) {
-		fprintf(stdout, "Busy time %lu ns, test time %lu ns, busy "
-				"percent %.2f, time/comp %lu ns\n",
+		info("Busy time %lu ns, test time %lu ns, busy "
+		      "percent %.2f, time/comp %lu ns\n",
 			res.busy_time, res.test_time,
 			(double)res.busy_time /
 			    ((uint64_t)conf.time * 1000000000) * 100,
@@ -2636,12 +2225,14 @@ int main(int argc, char *argv[])
 	}
 main_exit:
 	if (resources_destroy(&res)) {
-		fprintf(stderr, "failed to destroy resources\n");
+		err("failed to destroy resources\n");
 		rc = 1;
 	}
 	if (conf.dev_name)
 		free((char *)conf.dev_name);
-	fprintf(stdout, "\ntest result is %d\n", rc);
+
+	info("\n");
+	info("test result is %d\n", rc);
 
 	return rc;
 }
