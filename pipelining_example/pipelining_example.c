@@ -906,9 +906,9 @@ static void reg_data_mrs(struct resources *res, struct task *task)
 	struct mlx5dv_sig_block_attr sig_attr = {
 		.mem = &mem,
 		.wire = NULL,
-		.check_mask = MLX5DV_SIG_CHECK_T10DIF_GUARD |
-			      MLX5DV_SIG_CHECK_T10DIF_APPTAG |
-			      MLX5DV_SIG_CHECK_T10DIF_REFTAG,
+		.check_mask = MLX5DV_SIG_MASK_T10DIF_GUARD |
+			      MLX5DV_SIG_MASK_T10DIF_APPTAG |
+			      MLX5DV_SIG_MASK_T10DIF_REFTAG,
 	};
 
 	set_sig_domain_t10dif_type3(&mem, &mem_sig);

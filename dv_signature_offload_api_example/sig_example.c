@@ -191,34 +191,34 @@ const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
 		.pi_size	= 4,
 		.set_sig_domain	= set_sig_domain_crc32,
 		.dump_pi	= dump_pi_crc32,
-		.check_mask	= MLX5DV_SIG_CHECK_CRC32,
+		.check_mask	= MLX5DV_SIG_MASK_CRC32,
 	},
 	[SIG_TYPE_T10DIF_TYPE1] = {
 		.name		= "t10dif-type1",
 		.pi_size	= 8,
 		.set_sig_domain	= set_sig_domain_t10dif_type1_2,
 		.dump_pi	= dump_pi_t10dif,
-		.check_mask	= MLX5DV_SIG_CHECK_T10DIF_GUARD |
-				  MLX5DV_SIG_CHECK_T10DIF_APPTAG |
-				  MLX5DV_SIG_CHECK_T10DIF_REFTAG,
+		.check_mask	= MLX5DV_SIG_MASK_T10DIF_GUARD |
+				  MLX5DV_SIG_MASK_T10DIF_APPTAG |
+				  MLX5DV_SIG_MASK_T10DIF_REFTAG,
 	},
 	[SIG_TYPE_T10DIF_TYPE2] = {
 		.name		= "t10dif-type2",
 		.pi_size	= 8,
 		.set_sig_domain	= set_sig_domain_t10dif_type1_2,
 		.dump_pi	= dump_pi_t10dif,
-		.check_mask	= MLX5DV_SIG_CHECK_T10DIF_GUARD |
-				  MLX5DV_SIG_CHECK_T10DIF_APPTAG |
-				  MLX5DV_SIG_CHECK_T10DIF_REFTAG,
+		.check_mask	= MLX5DV_SIG_MASK_T10DIF_GUARD |
+				  MLX5DV_SIG_MASK_T10DIF_APPTAG |
+				  MLX5DV_SIG_MASK_T10DIF_REFTAG,
 	},
 	[SIG_TYPE_T10DIF_TYPE3] = {
 		.name		= "t10dif-type3",
 		.pi_size	= 8,
 		.set_sig_domain	= set_sig_domain_t10dif_type3,
 		.dump_pi	= dump_pi_t10dif,
-		.check_mask	= MLX5DV_SIG_CHECK_T10DIF_GUARD |
-				  MLX5DV_SIG_CHECK_T10DIF_APPTAG |
-				  MLX5DV_SIG_CHECK_T10DIF_REFTAG,
+		.check_mask	= MLX5DV_SIG_MASK_T10DIF_GUARD |
+				  MLX5DV_SIG_MASK_T10DIF_APPTAG |
+				  MLX5DV_SIG_MASK_T10DIF_REFTAG,
 	},
 };
 
