@@ -94,7 +94,6 @@ struct config_t {
 	int nb;
 	int interleave;
 	const struct signature_ops *sig;
-	int pipeline;
 	int corrupt_data;
 	int corrupt_app_tag;
 	int corrupt_ref_tag;
@@ -232,7 +231,6 @@ struct config_t config = {
 	.nb		= 8,
 	.interleave	= 0,
 	.sig		= &sig_ops[SIG_TYPE_CRC32],
-	.pipeline	= 0,
 	.corrupt_data	= 0,
 	.corrupt_offset	= -1,
 	.corrupt_app_tag	= 0,
@@ -537,63 +535,6 @@ static int post_send(struct resources *res, int opcode, const struct msg_t *req)
 	}
 	return rc;
 }
-
-#if 0
-static int post_send_pipeline(struct resources *res, const struct msg_t *req)
-{
-	struct ibv_exp_send_wr rdma_wr = {};
-	struct ibv_exp_send_wr send_wr = {};
-	struct ibv_sge rdma_sge;
-	struct ibv_sge send_sge;
-	struct ibv_exp_send_wr *bad_wr = NULL;
-	struct msg_t *msg;
-	int rc;
-
-	if (config.corrupt_data) {
-		res->data_buf[0] = 'e';
-		res->data_buf[1] = 'r';
-		res->data_buf[2] = 'r';
-		res->data_buf[3] = 'o';
-		res->data_buf[3] = 'r';
-	}
-
-	rdma_sge.addr = 0;
-	/* length is calculated according to wire domain */
-	rdma_sge.length = (config.block_size + config.sig->pi_size) * config.nb;
-	rdma_sge.lkey = res->sig_mr->lkey;
-
-	rdma_wr.next = &send_wr;
-	rdma_wr.sg_list = &rdma_sge;
-	rdma_wr.num_sge = 1;
-	rdma_wr.exp_opcode = IBV_EXP_WR_RDMA_WRITE;
-	rdma_wr.wr.rdma.remote_addr = ntohll(req->data.req.addr);
-	rdma_wr.wr.rdma.rkey = ntohl(req->data.req.rkey);
-
-	msg = (struct msg_t *)res->send_buf;
-	memset(msg, 0, sizeof(*msg));
-	msg->type = MSG_TYPE_READ_REP;
-	msg->data.rep.status = htonl(MSG_REP_STATUS_OK);
-
-	send_sge.addr = (uintptr_t)res->send_mr->addr;
-	send_sge.length = MSG_SIZE;
-	send_sge.lkey = res->send_mr->lkey;
-
-	send_wr.next = NULL;
-	send_wr.sg_list = &send_sge;
-	send_wr.num_sge = 1;
-	send_wr.exp_opcode = IBV_EXP_WR_SEND;
-	send_wr.exp_send_flags = IBV_EXP_SEND_SIGNALED;
-	send_wr.exp_send_flags |= IBV_EXP_SEND_SIG_PIPELINED;
-
-	rc = ibv_exp_post_send(res->qp, &rdma_wr, &bad_wr);
-	if (rc)
-		fprintf(stderr, "failed to post pipelined WRs\n");
-	else
-		fprintf(stdout, "Post pipelined WRs\n");
-
-	return rc;
-}
-#endif
 
 /******************************************************************************
  * Function: post_receive
@@ -1110,10 +1051,6 @@ static int resources_create(struct resources *res)
 	/* signature specific attributes */
 	mlx5_qp_attr.comp_mask = MLX5DV_QP_INIT_ATTR_MASK_SEND_OPS_FLAGS;
 	mlx5_qp_attr.send_ops_flags = MLX5DV_QP_EX_WITH_MKEY_CONFIGURE;
-	if (is_server() && config.pipeline) {
-		mlx5_qp_attr.comp_mask |= MLX5DV_QP_INIT_ATTR_MASK_QP_CREATE_FLAGS;
-		mlx5_qp_attr.create_flags = MLX5DV_QP_CREATE_SIG_PIPELINING;
-	}
 
 	res->qp = mlx5dv_create_qp(res->ib_ctx, &qp_attr, &mlx5_qp_attr);
 	if (!res->qp) {
@@ -1664,50 +1601,6 @@ err_exit:
 	return rc;
 }
 
-int handle_read_req_pipeline(struct resources *res,
-			     const struct msg_t *req)
-{
-	return 0;
-#if 0
-	struct ibv_exp_wc *wc = &res->wc;
-	int rc = 0;
-
-	rc = post_receive(res);
-	if (rc)
-		goto err_exit;
-
-	rc = reg_sig_mr(res, SIG_MODE_CHECK);
-	if (rc)
-		goto err_exit;
-
-	rc = post_send_pipeline(res, req);
-	if (rc)
-		goto err_exit;
-
-	rc = poll_completion(res);
-	if (rc)
-		goto err_exit;
-
-	if (wc->exp_wc_flags & IBV_EXP_WC_SIG_PIPELINE_CANCELED) {
-		fprintf(stderr, "A signature error has been detected\n");
-
-		rc = send_repl(res, MSG_TYPE_READ_REP,
-			       MSG_REP_STATUS_FAIL);
-		if (rc)
-			goto err_exit;
-	}
-
-	rc = check_sig_mr(res->sig_mr);
-	if (rc && !config.corrupt_data)
-		goto err_exit;
-
-	rc = inv_sig_mr(res);
-
-err_exit:
-	return rc;
-#endif
-}
-
 int server(struct resources *res)
 {
 	int rc = 0;
@@ -1727,10 +1620,7 @@ int server(struct resources *res)
 			break;
 
 		case MSG_TYPE_READ_REQ:
-			if (config.pipeline)
-				rc = handle_read_req_pipeline(res, msg);
-			else
-				rc = handle_read_req(res, msg);
+			rc = handle_read_req(res, msg);
 			if (rc)
 				close_conn = 1;
 			break;
@@ -1894,7 +1784,6 @@ static void print_config(void)
 	fprintf(stdout, " Number of blocks : %u\n", config.nb);
 	fprintf(stdout, " Interleave : %u\n", config.interleave);
 	fprintf(stdout, " Signature type : %s\n", config.sig->name);
-	fprintf(stdout, " Pipeline : %d\n", config.pipeline);
 	fprintf(stdout, " Corrupt data : %d\n", config.corrupt_data);
 	fprintf(stdout, " Corrupt app_tag : %d\n", config.corrupt_app_tag);
 	fprintf(stdout, " Corrupt ref_tag : %d\n", config.corrupt_ref_tag);
@@ -1945,8 +1834,6 @@ static void usage(const char *argv0)
 	fprintf(stdout, " -s, --sig-type <type>        Supported signature "
 			"types: crc32, t10dif-type1, t10dif-type2, "
 			"t10dif-type3 (default crc32)\n");
-	fprintf(stdout,
-		" -l, --pipeline               Enable pipeline\n");
 	fprintf(stdout, " -c, --corrupt-data           Corrupt data (i.e., "
 			"corrupt-offset = 0)  for READ read operation\n");
 	fprintf(stdout, " -a, --corrupt-app-tag        Corrupt apptag (i.e., "
@@ -1995,7 +1882,6 @@ int main(int argc, char *argv[])
 			{ .name = "number-of-blocks",	.has_arg = 1, .val = 'n' },
 			{ .name = "interleave",		.has_arg = 0, .val = 'o' },
 			{ .name = "sig-type",		.has_arg = 1, .val = 's' },
-			{ .name = "pipeline",		.has_arg = 0, .val = 'l' },
 			{ .name = "corrupt-data",	.has_arg = 0, .val = 'c' },
 			{ .name = "corrupt-app-tag",	.has_arg = 0, .val = 'a' },
 			{ .name = "corrupt-ref-tag",	.has_arg = 0, .val = 'r' },
@@ -2053,9 +1939,6 @@ int main(int argc, char *argv[])
 				usage(argv[0]);
 				return 1;
 			}
-			break;
-		case 'l':
-			config.pipeline = 1;
 			break;
 		case 'c':
 			config.corrupt_data = 1;
