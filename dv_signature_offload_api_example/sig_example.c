@@ -824,7 +824,7 @@ int alloc_and_register_buffer(struct ibv_pd *pd,
 	if (!*buf) {
 		fprintf(stderr, "failed to malloc %Zu bytes to memory buffer\n",
 			size);
-		return 1;
+		return errno;
 	}
 	memset(*buf, 1, size);
 
@@ -832,11 +832,11 @@ int alloc_and_register_buffer(struct ibv_pd *pd,
 		   IBV_ACCESS_REMOTE_WRITE;
 	*mr = ibv_reg_mr(pd, *buf, size, mr_flags);
 	if (!*mr) {
-		fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x\n",
-			mr_flags);
+		fprintf(stderr, "ibv_reg_mr failed with mr_flags=0x%x, err %d\n",
+			mr_flags, errno);
 		free(*buf);
 		*buf = NULL;
-		return 1;
+		return errno;
 	}
 
 	return 0;
