@@ -646,7 +646,7 @@ static int create_tx(struct resources *res)
 
 		desc->sig_mr = create_sig_mr(res);
 		if (!desc->sig_mr) {
-			rc = -1;
+			rc = errno;
 			goto err_free_tx;
 		}
 	}
@@ -1145,7 +1145,7 @@ static int resources_create(struct resources *res)
 	res->qp = create_qp(res);
 	if (!res->qp) {
 		err("failed to create QP\n");
-		rc = 1;
+		rc = errno;
 		goto resources_create_exit;
 	}
 resources_create_exit:
@@ -2181,8 +2181,11 @@ int main(int argc, char *argv[])
 
 	print_config();
 
-	if (resources_create(&res)) {
-		err("failed to create resources\n");
+	rc = resources_create(&res);
+	if (rc) {
+		err("failed to create resources: %s\n", strerror(rc));
+		if (rc == EOPNOTSUPP || rc == ENOTSUP)
+			rc = 0;
 		goto main_exit;
 	}
 

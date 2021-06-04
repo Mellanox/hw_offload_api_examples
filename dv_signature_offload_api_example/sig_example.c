@@ -1025,7 +1025,9 @@ static int resources_create(struct resources *res)
 
 	res->sig_mr = mlx5dv_create_mkey(&mkey_attr);
 	if (!res->sig_mr) {
-		fprintf(stdout, "failed to create the signature\n");
+		fprintf(stdout, "failed to create the signature: %s\n",
+			strerror(errno));
+		rc = errno;
 		goto resources_create_exit;
 	}
 
@@ -1054,8 +1056,8 @@ static int resources_create(struct resources *res)
 
 	res->qp = mlx5dv_create_qp(res->ib_ctx, &qp_attr, &mlx5_qp_attr);
 	if (!res->qp) {
-		fprintf(stderr, "failed to create QP\n");
-		rc = 1;
+		fprintf(stderr, "failed to create QP: %s\n", strerror(errno));
+		rc = errno;
 		goto resources_create_exit;
 	}
 	fprintf(stdout, "QP was created, QP number=0x%x\n", res->qp->qp_num);
@@ -1991,8 +1993,12 @@ int main(int argc, char *argv[])
 
 	resources_init(&res);
 
-	if (resources_create(&res)) {
-		fprintf(stderr, "failed to create resources\n");
+	rc = resources_create(&res);
+	if (rc) {
+		fprintf(stderr, "failed to create resources: %s\n", strerror(rc));
+		if (rc == EOPNOTSUPP || rc == ENOTSUP)
+			rc = 0;
+
 		goto main_exit;
 	}
 
