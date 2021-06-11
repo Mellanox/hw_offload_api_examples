@@ -2002,8 +2002,9 @@ int main(int argc, char *argv[])
 		goto main_exit;
 	}
 
-	if (connect_qp(&res)) {
-		fprintf(stderr, "failed to connect QPs\n");
+	rc = connect_qp(&res);
+	if (rc) {
+		fprintf(stderr, "failed to connect QPs, err %d\n", rc);
 
 		goto main_exit;
 	}
