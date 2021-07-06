@@ -3,17 +3,38 @@ BUILD
 =====
 
 $ make
-cc -I/.autodirect/mtrswgwork/allenz/work/new_api/rdma-core/build/include -g -std=c99 -Wall -Wno-unused-function   -c -o pipelining_example.o pipelining_example.c
-cc -L/.autodirect/mtrswgwork/allenz/work/new_api/rdma-core/build/lib -Wl,-rpath -Wl,/.autodirect/mtrswgwork/allenz/work/new_api/rdma-core/build/lib -o ibv_pipelining_example pipelining_example.o -lmlx5 -libverbs
+cc -std=c99 -Wall -g   -c -o pipelining_example.o pipelining_example.c
+cc  -o ibv_pipelining_example pipelining_example.o -lmlx5 -libverbs -lrdmacm
 
 
-
-Examples:
+EXAMPLES
+========
 
 # Run the server
-./ibv_pipelining_example -d mlx5_1 -g 3 -q 8
+$ ./ibv_pipelining_example
+ -----------------Configuration------------------
+ port : 19875
+ Block size : 512
+ I/O size : 4096
+ Queue depth : 8
+ ------------------------------------------------
 
-# Run the initiator
-./ibv_pipelining_example -d mlx5_1 -g 3 -q 8 2.2.2.2
+Polls 1155225, completions 31773, comps/poll 0.0
+Busy time 269967195 ns, test time 999964409 ns, busy percent 27.00, time/comp 8496 ns
+
+
+# Run the client
+$ ./ibv_pipelining_example -c 10 192.168.1.1
+ -----------------Configuration------------------
+ Remote IP : 192.168.1.1
+ port : 19875
+ Block size : 512
+ I/O size : 4096
+ Queue depth : 8
+ ------------------------------------------------
+
+IOps : 15372
+Polls 41097838, completions 30752, comps/poll 0.0
+
 
 # Run './ibv_pipelining_example --help' for more information.
