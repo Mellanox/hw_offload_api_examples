@@ -3,17 +3,104 @@ BUILD
 =====
 
 $ make
-cc    -c -o sig_example.o sig_example.c
-cc -libverbs -o ibv_sig_example sig_example.o
+cc -g -Wall   -c -o sig_example.o sig_example.c
+cc  -o ibv_sig_example sig_example.o -lmlx5 -libverbs -lrdmacm
 
 
-Examples:
+EXAMPLES
+========
 
 # Run the server
-./ibv_sig_example -d mlx5_0 -g 0 -i 1
+$ ./ibv_sig_example
+ ----------------------------------------------
+ Port : 19875
+ Block size : 512
+ Number of blocks : 8
+ Interleave : 0
+ Signature type : crc32
+ Corrupt data : 0
+ Corrupt app_tag : 0
+ Corrupt ref_tag : 0
+ Corrupt offset : -1
+ ----------------------------------------------
+
+Post receive WR
+CQE status success, opcode RECV
+Post mkey configure WR, opcode DRIVER1
+CQE status success, opcode DRIVER1
+Sig MKEY is configured
+Post SEND WR, opcode RDMA_READ
+CQE status success, opcode RDMA_READ
+SIG status: OK
+CQE status success, opcode LOCAL_INV
+Sig MKEY is invalidated
+Post receive WR
+Post SEND WR, opcode SEND
+CQE status success, opcode SEND
+CQE status success, opcode RECV
+Post mkey configure WR, opcode DRIVER1
+CQE status success, opcode DRIVER1
+Sig MKEY is configured
+Post SEND WR, opcode RDMA_WRITE
+CQE status success, opcode RDMA_WRITE
+SIG status: OK
+CQE status success, opcode LOCAL_INV
+Sig MKEY is invalidated
+Post receive WR
+Post SEND WR, opcode SEND
+CQE status success, opcode SEND
+CQE status success, opcode RECV
+
 
 # Run the initiator
-./ibv_sig_example -d mlx5_0 -g 0 -i 1 11.212.80.5
+$ ./ibv_sig_example 192.168.1.1
+ ----------------------------------------------
+ Remote IP : 192.168.1.1
+ Port : 19875
+ Block size : 512
+ Number of blocks : 8
+ Interleave : 0
+ Signature type : crc32
+ Corrupt data : 0
+ Corrupt app_tag : 0
+ Corrupt ref_tag : 0
+ Corrupt offset : -1
+ ----------------------------------------------
+
+Post receive WR
+Post mkey configure WR, opcode DRIVER1
+CQE status success, opcode DRIVER1
+Sig MKEY is configured
+Send write request
+Post SEND WR, opcode SEND
+CQE status success, opcode SEND
+CQE status success, opcode RECV
+WRITE_REPLY: status OK
+SIG status: OK
+CQE status success, opcode LOCAL_INV
+Sig MKEY is invalidated
+Post receive WR
+Post mkey configure WR, opcode DRIVER1
+CQE status success, opcode DRIVER1
+Sig MKEY is configured
+Post SEND WR, opcode SEND
+CQE status success, opcode SEND
+CQE status success, opcode RECV
+READ_REPLY: status OK
+SIG status: OK
+Dump PI:
+block[0] : crc32 0x15d286f7
+block[1] : crc32 0x15d286f7
+block[2] : crc32 0x15d286f7
+block[3] : crc32 0x15d286f7
+block[4] : crc32 0x15d286f7
+block[5] : crc32 0x15d286f7
+block[6] : crc32 0x15d286f7
+block[7] : crc32 0x15d286f7
+CQE status success, opcode LOCAL_INV
+Sig MKEY is invalidated
+Post SEND WR, opcode SEND
+CQE status success, opcode SEND
 
 
 # Run './ibv_sig_example --help' for more information.
