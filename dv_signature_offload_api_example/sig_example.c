@@ -132,7 +132,7 @@ struct msg_t {
 /* structure of system resources */
 struct resources {
 	struct rdma_cm_id *cm_id;	/* connection on client side,*/
-					/* listener on service side. */
+					/* listener on server side. */
 	struct rdma_cm_id *child_cm_id;	/* connection on server side */
 	struct ibv_context *ib_ctx;
 	struct ibv_pd *pd;
@@ -307,19 +307,17 @@ static int poll_completion(struct resources *res, enum ibv_wc_opcode expected)
 		return -1;
 	}
 	if (wc->status != IBV_WC_SUCCESS) {
-		err("CQE status %s, opcode %s\n",
-			ibv_wc_status_str(wc->status),
-			wc_opcode_str(wc->opcode));
+		err("CQE status %s, opcode %s\n", ibv_wc_status_str(wc->status),
+		    wc_opcode_str(wc->opcode));
 		return -1;
 	}
 	if (wc->opcode != expected) {
 		err("CQE opcode (%s) != expected opcode (%s)\n",
-			wc_opcode_str(wc->opcode),
-			wc_opcode_str(expected));
+		    wc_opcode_str(wc->opcode), wc_opcode_str(expected));
 		return -1;
 	}
 	info("CQE status %s, opcode %s\n", ibv_wc_status_str(wc->status),
-		wc_opcode_str(wc->opcode));
+	     wc_opcode_str(wc->opcode));
 
 	return 0;
 }
@@ -385,7 +383,7 @@ static int post_send(struct resources *res, int opcode, const struct msg_t *req)
 	rc = ibv_post_send(res->qp, &sr, &bad_wr);
 	if (rc) {
 		err("ibv_post_send: opcode %s: %s\n", send_opcode_str(opcode),
-			strerror(rc));
+		    strerror(rc));
 		return -1;
 	}
 
@@ -466,10 +464,11 @@ static void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *domain, void *s
 	memset(crc, 0, sizeof(*crc));
 
 	domain->sig_type = MLX5DV_SIG_TYPE_CRC;
-        domain->block_size = (config.block_size == 512)
-		? MLX5DV_BLOCK_SIZE_512 : MLX5DV_BLOCK_SIZE_4096;
+	domain->block_size = (config.block_size == 512) ?
+				     MLX5DV_BLOCK_SIZE_512 :
+				     MLX5DV_BLOCK_SIZE_4096;
 
-        crc->type = MLX5DV_SIG_CRC_TYPE_CRC32;
+	crc->type = MLX5DV_SIG_CRC_TYPE_CRC32;
 	crc->seed = 0xffffffff;
 	domain->sig.crc = crc;
 }
@@ -493,9 +492,7 @@ static void dump_pi_t10dif(void *pi_ptr)
 	struct t10dif_pi *pi = pi_ptr;
 
 	info("t10dif { guard 0x%x, application tag 0x%x, reference tag 0x%x }\n",
-		ntohs(pi->guard),
-		ntohs(pi->app_tag),
-		ntohl(pi->ref_tag));
+	     ntohs(pi->guard), ntohs(pi->app_tag), ntohl(pi->ref_tag));
 }
 
 static void set_sig_domain_t10dif_type1_2(struct mlx5dv_sig_block_domain *domain,
@@ -514,8 +511,9 @@ static void set_sig_domain_t10dif_type1_2(struct mlx5dv_sig_block_domain *domain
 	memset(domain, 0, sizeof(*domain));
 	domain->sig.dif = dif;
 	domain->sig_type = MLX5DV_SIG_TYPE_T10DIF;
-	domain->block_size = (config.block_size == 512)
-		? MLX5DV_BLOCK_SIZE_512 : MLX5DV_BLOCK_SIZE_4096;
+	domain->block_size = (config.block_size == 512) ?
+				     MLX5DV_BLOCK_SIZE_512 :
+				     MLX5DV_BLOCK_SIZE_4096;
 }
 
 static void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *domain,
@@ -533,8 +531,9 @@ static void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *domain,
 	memset(domain, 0, sizeof(*domain));
 	domain->sig.dif = dif;
 	domain->sig_type = MLX5DV_SIG_TYPE_T10DIF;
-	domain->block_size = (config.block_size == 512)
-		? MLX5DV_BLOCK_SIZE_512 : MLX5DV_BLOCK_SIZE_4096;
+	domain->block_size = (config.block_size == 512) ?
+				     MLX5DV_BLOCK_SIZE_512 :
+				     MLX5DV_BLOCK_SIZE_4096;
 }
 
 static int configure_sig_mkey(struct resources *res,
@@ -708,8 +707,7 @@ static int destroy_qp(struct ibv_qp **qp)
 
 	rc = ibv_destroy_qp(*qp);
 	if (rc) {
-		err("ibv_destroy_qp: QP 0x%x: %s\n", qpn,
-		    strerror(rc));
+		err("ibv_destroy_qp: QP 0x%x: %s\n", qpn, strerror(rc));
 		rc = -1;
 	}
 	*qp = NULL;
@@ -741,10 +739,6 @@ static struct ibv_qp *create_qp(struct resources *res)
 				 IBV_QP_EX_WITH_SEND |
 				 IBV_QP_EX_WITH_RDMA_READ |
 				 IBV_QP_EX_WITH_LOCAL_INV;
-
-	/* signature specific attributes */
-	mlx5_qp_attr.comp_mask = MLX5DV_QP_INIT_ATTR_MASK_SEND_OPS_FLAGS;
-	mlx5_qp_attr.send_ops_flags = MLX5DV_QP_EX_WITH_MKEY_CONFIGURE;
 
 	/* signature specific attributes */
 	mlx5_qp_attr.comp_mask = MLX5DV_QP_INIT_ATTR_MASK_SEND_OPS_FLAGS;
@@ -908,9 +902,11 @@ static int resources_create(struct resources *res)
 	if (!res->data_mr)
 		goto err_exit;
 
-	res->pi_mr = alloc_mr(res->pd, res->pi_buf_size);
-	if (!res->pi_mr)
-		goto err_exit;
+	if (res->pi_buf_size) {
+		res->pi_mr = alloc_mr(res->pd, res->pi_buf_size);
+		if (!res->pi_mr)
+			goto err_exit;
+	}
 
 	res->recv_buf = res->recv_mr->addr;
 	res->send_buf = res->send_mr->addr;
@@ -1652,7 +1648,7 @@ int main(int argc, char *argv[])
 	rc = resources_create(&res);
 	if (rc) {
 		if (skip) {
-			err("Signature pipelining feature is not supported by the specified RDMA device\n");
+			err("Signature feature is not supported by the specified RDMA device\n");
 			rc = 0;
 		}
 		goto free_res_and_exit;

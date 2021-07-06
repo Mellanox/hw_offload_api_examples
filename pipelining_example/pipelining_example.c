@@ -154,7 +154,7 @@ struct tx_desc {
 struct resources {
 	/* RDMA CM stufff */
 	struct rdma_cm_id *cm_id;	/* connection on client side,*/
-					/* listener on service side. */
+					/* listener on server side. */
 	struct rdma_cm_id *child_cm_id;	/* connection on server side */
 	struct ibv_context *ib_ctx;
 	struct ibv_pd *pd;
