@@ -907,12 +907,13 @@ static int resources_create(struct resources *res)
 		res->pi_mr = alloc_mr(res->pd, res->pi_buf_size);
 		if (!res->pi_mr)
 			goto err_exit;
+
+		res->pi_buf = res->pi_mr->addr;
 	}
 
 	res->recv_buf = res->recv_mr->addr;
 	res->send_buf = res->send_mr->addr;
 	res->data_buf = res->data_mr->addr;
-	res->pi_buf = res->pi_mr->addr;
 
 	res->sig_mkey = create_sig_mkey(res);
 	if (!res->sig_mkey)
