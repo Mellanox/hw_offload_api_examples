@@ -164,6 +164,38 @@ struct resources {
 	int sock; /* TCP socket file descriptor */
 };
 
+static int is_sig_supported(struct ibv_context *ibv_ctx,
+			    uint32_t prot,
+			    uint16_t sig)
+{
+	struct mlx5dv_context ctx = {
+		.comp_mask = MLX5DV_CONTEXT_MASK_SIGNATURE_OFFLOAD,
+	};
+	int rc;
+
+	rc = mlx5dv_query_device(ibv_ctx, &ctx);
+	if (rc) {
+		err("mlx5dv_query_device: %s\n", strerror(rc));
+		return -1;
+	}
+
+	switch (prot) {
+	case MLX5DV_SIG_PROT_CAP_T10DIF:
+		if (!(ctx.sig_caps.t10dif_bg & sig))
+			return 0;
+		break;
+	case MLX5DV_SIG_PROT_CAP_CRC:
+		if (!(ctx.sig_caps.crc_type & sig))
+			return 0;
+		break;
+	default:
+		err("unknown prot type %u\n", prot);
+		return -1;
+	}
+
+	return 1;
+}
+
 static void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *domain, void *sig)
 {
 	struct mlx5dv_sig_crc *crc = sig;
@@ -186,6 +218,11 @@ static void dump_pi_crc32(void *pi)
 	uint32_t crc = ntohl(*(uint32_t *)pi);
 
 	info("crc32 0x%x\n", crc);
+}
+
+static int is_crc32_supported(struct ibv_context *ctx)
+{
+	return is_sig_supported(ctx, MLX5DV_SIG_PROT_CAP_CRC, MLX5DV_SIG_CRC_TYPE_CAP_CRC32);
 }
 
 struct t10dif_pi {
@@ -244,6 +281,11 @@ static void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *domain,
 				     MLX5DV_BLOCK_SIZE_4096;
 }
 
+static int is_t10dif_supported(struct ibv_context *ctx)
+{
+	return is_sig_supported(ctx, MLX5DV_SIG_PROT_CAP_T10DIF, MLX5DV_SIG_T10DIF_BG_CAP_CRC);
+}
+
 enum signature_types {
 	SIG_TYPE_CRC32 = 0,
 	SIG_TYPE_T10DIF_TYPE1,
@@ -259,6 +301,7 @@ struct signature_ops {
 	void		(*set_sig_domain)(struct mlx5dv_sig_block_domain *, void *);
 	void		(*dump_pi)(void *pi);
 	uint8_t		check_mask;
+	int		(*is_supported)(struct ibv_context *ctx);
 };
 
 const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
@@ -268,6 +311,7 @@ const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
 		.set_sig_domain	= set_sig_domain_crc32,
 		.dump_pi	= dump_pi_crc32,
 		.check_mask	= MLX5DV_SIG_MASK_CRC32,
+		.is_supported	= is_crc32_supported,
 	},
 	[SIG_TYPE_T10DIF_TYPE1] = {
 		.name		= "t10dif-type1",
@@ -277,6 +321,7 @@ const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
 		.check_mask	= MLX5DV_SIG_MASK_T10DIF_GUARD |
 				  MLX5DV_SIG_MASK_T10DIF_APPTAG |
 				  MLX5DV_SIG_MASK_T10DIF_REFTAG,
+		.is_supported	= is_t10dif_supported,
 	},
 	[SIG_TYPE_T10DIF_TYPE2] = {
 		.name		= "t10dif-type2",
@@ -286,6 +331,7 @@ const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
 		.check_mask	= MLX5DV_SIG_MASK_T10DIF_GUARD |
 				  MLX5DV_SIG_MASK_T10DIF_APPTAG |
 				  MLX5DV_SIG_MASK_T10DIF_REFTAG,
+		.is_supported	= is_t10dif_supported,
 	},
 	[SIG_TYPE_T10DIF_TYPE3] = {
 		.name		= "t10dif-type3",
@@ -295,6 +341,7 @@ const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
 		.check_mask	= MLX5DV_SIG_MASK_T10DIF_GUARD |
 				  MLX5DV_SIG_MASK_T10DIF_APPTAG |
 				  MLX5DV_SIG_MASK_T10DIF_REFTAG,
+		.is_supported	= is_t10dif_supported,
 	},
 };
 
@@ -491,14 +538,8 @@ static struct mlx5dv_mkey *create_sig_mkey(struct resources *res)
 	struct mlx5dv_mkey *mkey;
 
 	mkey = mlx5dv_create_mkey(&mkey_attr);
-	if (!mkey) {
-		if (errno != EOPNOTSUPP && errno != ENOTSUP) {
-			err("mlx5dv_create_mkey: %s\n", strerror(errno));
-		} else {
-			info("mlx5dv_create_mkey: %s\n", strerror(errno));
-			skip = true;
-		}
-	}
+	if (!mkey)
+		err("mlx5dv_create_mkey: %s\n", strerror(errno));
 
 	return mkey;
 }
@@ -775,14 +816,8 @@ static struct ibv_qp *create_qp(struct resources *res)
 	mlx5_qp_attr.send_ops_flags = MLX5DV_QP_EX_WITH_MKEY_CONFIGURE;
 
 	qp = mlx5dv_create_qp(res->ib_ctx, &qp_attr, &mlx5_qp_attr);
-	if (!qp) {
-		if (errno != EOPNOTSUPP && errno != ENOTSUP) {
-			err("mlx5dv_create_qp: %s\n", strerror(errno));
-		} else {
-			info("mlx5dv_create_qp: %s\n", strerror(errno));
-			skip = true;
-		}
-	}
+	if (!qp)
+		err("mlx5dv_create_qp: %s\n", strerror(errno));
 
 	return qp;
 }
@@ -893,6 +928,7 @@ static int resources_destroy(struct resources *res)
 
 static int resources_create(struct resources *res)
 {
+	int rc;
 	int cq_size = 0;
 
 	if (is_client())
@@ -905,6 +941,17 @@ static int resources_create(struct resources *res)
 		    ibv_get_device_name(res->ib_ctx->device));
 		skip = true;
 		goto err_exit;
+	}
+
+	rc = config.sig->is_supported(res->ib_ctx);
+	if (rc < 0)
+		return -1;
+
+	if (!rc) {
+		err("Signature feature is not supported by device %s\n",
+		    ibv_get_device_name(res->ib_ctx->device));
+		skip = true;
+		return -1;
 	}
 
 	res->pd = ibv_alloc_pd(res->ib_ctx);
@@ -1640,10 +1687,9 @@ int main(int argc, char *argv[])
 
 	rc = resources_create(&res);
 	if (rc) {
-		if (skip) {
-			err("Signature feature is not supported by the specified RDMA device\n");
+		if (skip)
 			rc = 0;
-		}
+
 		goto free_res_and_exit;
 	}
 
