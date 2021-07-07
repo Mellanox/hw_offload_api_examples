@@ -196,7 +196,9 @@ static int is_sig_supported(struct ibv_context *ibv_ctx,
 	return 1;
 }
 
-static void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *domain, void *sig)
+static void _set_sig_domain_crc32(enum mlx5dv_sig_crc_type type,
+				  struct mlx5dv_sig_block_domain *domain,
+				  void *sig)
 {
 	struct mlx5dv_sig_crc *crc = sig;
 
@@ -208,9 +210,19 @@ static void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *domain, void *s
 				     MLX5DV_BLOCK_SIZE_512 :
 				     MLX5DV_BLOCK_SIZE_4096;
 
-	crc->type = MLX5DV_SIG_CRC_TYPE_CRC32;
+	crc->type = type;
 	crc->seed = 0xffffffff;
 	domain->sig.crc = crc;
+}
+
+static void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *domain, void *sig)
+{
+	_set_sig_domain_crc32(MLX5DV_SIG_CRC_TYPE_CRC32, domain, sig);
+}
+
+static void set_sig_domain_crc32c(struct mlx5dv_sig_block_domain *domain, void *sig)
+{
+	_set_sig_domain_crc32(MLX5DV_SIG_CRC_TYPE_CRC32C, domain, sig);
 }
 
 static void dump_pi_crc32(void *pi)
@@ -223,6 +235,11 @@ static void dump_pi_crc32(void *pi)
 static int is_crc32_supported(struct ibv_context *ctx)
 {
 	return is_sig_supported(ctx, MLX5DV_SIG_PROT_CAP_CRC, MLX5DV_SIG_CRC_TYPE_CAP_CRC32);
+}
+
+static int is_crc32c_supported(struct ibv_context *ctx)
+{
+	return is_sig_supported(ctx, MLX5DV_SIG_PROT_CAP_CRC, MLX5DV_SIG_CRC_TYPE_CAP_CRC32C);
 }
 
 struct t10dif_pi {
@@ -288,6 +305,7 @@ static int is_t10dif_supported(struct ibv_context *ctx)
 
 enum signature_types {
 	SIG_TYPE_CRC32 = 0,
+	SIG_TYPE_CRC32C,
 	SIG_TYPE_T10DIF_TYPE1,
 	SIG_TYPE_T10DIF_TYPE2,
 	SIG_TYPE_T10DIF_TYPE3,
@@ -312,6 +330,14 @@ const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
 		.dump_pi	= dump_pi_crc32,
 		.check_mask	= MLX5DV_SIG_MASK_CRC32,
 		.is_supported	= is_crc32_supported,
+	},
+	[SIG_TYPE_CRC32C] = {
+		.name		= "crc32c",
+		.pi_size	= 4,
+		.set_sig_domain	= set_sig_domain_crc32c,
+		.dump_pi	= dump_pi_crc32,
+		.check_mask	= MLX5DV_SIG_MASK_CRC32C,
+		.is_supported	= is_crc32c_supported,
 	},
 	[SIG_TYPE_T10DIF_TYPE1] = {
 		.name		= "t10dif-type1",
@@ -1512,7 +1538,7 @@ static void usage(const char *argv0)
 	info(" -b, --block-size <size>      size of data block, only 512 and 4096 are supported (default 512)\n");
 	info(" -n, --number-of-blocks <NB>  Number of blocks per RDMA operation (default 8)\n");
 	info(" -o, --interleave             Data blocks and protection blocks are interleaved in the same buf\n");
-	info(" -s, --sig-type <type>        Supported signature types: crc32, t10dif-type1, t10dif-type2, "
+	info(" -s, --sig-type <type>        Supported signature types: crc32, crc32c, t10dif-type1, t10dif-type2, "
 					   "t10dif-type3 (default crc32)\n");
 	info(" -c, --corrupt-data           Corrupt data (i.e., corrupt-offset = 0)  for READ read operation\n");
 	info(" -a, --corrupt-app-tag        Corrupt apptag (i.e., corrupt-offset = block-size + 2) for READ "
