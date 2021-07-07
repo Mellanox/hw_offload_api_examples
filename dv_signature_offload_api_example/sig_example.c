@@ -80,28 +80,7 @@ static inline uint64_t ntohll(uint64_t x)
 
 #define err(format, arg...)	fprintf(stderr, "ERROR: " format, ##arg)
 
-enum sig_mode {
-	SIG_MODE_INSERT,
-	SIG_MODE_CHECK,
-	SIG_MODE_STRIP,
-};
-
-struct signature_ops;
-
-/* structure of test parameters */
-struct config_t {
-	struct sockaddr_storage src_addr;
-	struct sockaddr_storage dst_addr;
-	unsigned long int port;
-	int block_size;
-	int nb;
-	int interleave;
-	const struct signature_ops *sig;
-	int corrupt_data;
-	int corrupt_app_tag;
-	int corrupt_ref_tag;
-	int corrupt_offset;
-};
+static bool skip = false;
 
 enum msg_types {
 	MSG_TYPE_WRITE_REQ = 0,
@@ -130,6 +109,35 @@ struct msg_t {
 } __attribute__((packed));
 #define MSG_SIZE (sizeof(struct msg_t))
 
+/* structure of test parameters */
+struct {
+	struct sockaddr_storage src_addr;
+	struct sockaddr_storage dst_addr;
+	unsigned long int port;
+	int block_size;
+	int nb;
+	int interleave;
+	const struct signature_ops *sig;
+	int corrupt_data;
+	int corrupt_app_tag;
+	int corrupt_ref_tag;
+	int corrupt_offset;
+} config = {
+	.port			= 19875,
+	.block_size		= 512,
+	.nb			= 8,
+	.interleave		= 0,
+	.corrupt_data		= 0,
+	.corrupt_offset		= -1,
+	.corrupt_app_tag	= 0,
+	.corrupt_ref_tag	= 0,
+};
+
+static inline int is_client()
+{
+	return config.dst_addr.ss_family;
+}
+
 /* structure of system resources */
 struct resources {
 	struct rdma_cm_id *cm_id;	/* connection on client side,*/
@@ -156,13 +164,85 @@ struct resources {
 	int sock; /* TCP socket file descriptor */
 };
 
-struct signature_ops {
-	const char *	name;
-	size_t		pi_size;
-	void		(*set_sig_domain)(struct mlx5dv_sig_block_domain *, void *);
-	void		(*dump_pi)(void *pi);
-	uint8_t		check_mask;
-};
+static void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *domain, void *sig)
+{
+	struct mlx5dv_sig_crc *crc = sig;
+
+	memset(domain, 0, sizeof(*domain));
+	memset(crc, 0, sizeof(*crc));
+
+	domain->sig_type = MLX5DV_SIG_TYPE_CRC;
+	domain->block_size = (config.block_size == 512) ?
+				     MLX5DV_BLOCK_SIZE_512 :
+				     MLX5DV_BLOCK_SIZE_4096;
+
+	crc->type = MLX5DV_SIG_CRC_TYPE_CRC32;
+	crc->seed = 0xffffffff;
+	domain->sig.crc = crc;
+}
+
+static void dump_pi_crc32(void *pi)
+{
+	uint32_t crc = ntohl(*(uint32_t *)pi);
+
+	info("crc32 0x%x\n", crc);
+}
+
+struct t10dif_pi {
+	uint16_t guard;
+	uint16_t app_tag;
+	uint32_t ref_tag;
+
+} __attribute__((packed));
+
+static void dump_pi_t10dif(void *pi_ptr)
+{
+	struct t10dif_pi *pi = pi_ptr;
+
+	info("t10dif { guard 0x%x, application tag 0x%x, reference tag 0x%x }\n",
+	     ntohs(pi->guard), ntohs(pi->app_tag), ntohl(pi->ref_tag));
+}
+
+static void set_sig_domain_t10dif_type1_2(struct mlx5dv_sig_block_domain *domain,
+					  void *sig)
+{
+	struct mlx5dv_sig_t10dif *dif = sig;
+
+	memset(dif, 0, sizeof(*dif));
+	dif->bg_type = MLX5DV_SIG_T10DIF_CRC;
+	dif->bg = 0xffff;
+	dif->app_tag = 0x5678;
+	dif->ref_tag = 0xabcdef90;
+	dif->flags = MLX5DV_SIG_T10DIF_FLAG_REF_REMAP |
+		     MLX5DV_SIG_T10DIF_FLAG_APP_ESCAPE;
+
+	memset(domain, 0, sizeof(*domain));
+	domain->sig.dif = dif;
+	domain->sig_type = MLX5DV_SIG_TYPE_T10DIF;
+	domain->block_size = (config.block_size == 512) ?
+				     MLX5DV_BLOCK_SIZE_512 :
+				     MLX5DV_BLOCK_SIZE_4096;
+}
+
+static void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *domain,
+					void *sig)
+{
+	struct mlx5dv_sig_t10dif *dif = sig;
+
+	memset(dif, 0, sizeof(*dif));
+	dif->bg_type = MLX5DV_SIG_T10DIF_CRC;
+	dif->bg = 0xffff;
+	dif->app_tag = 0x5678;
+	dif->ref_tag = 0xabcdef90;
+	dif->flags = MLX5DV_SIG_T10DIF_FLAG_APP_REF_ESCAPE;
+
+	memset(domain, 0, sizeof(*domain));
+	domain->sig.dif = dif;
+	domain->sig_type = MLX5DV_SIG_TYPE_T10DIF;
+	domain->block_size = (config.block_size == 512) ?
+				     MLX5DV_BLOCK_SIZE_512 :
+				     MLX5DV_BLOCK_SIZE_4096;
+}
 
 enum signature_types {
 	SIG_TYPE_CRC32 = 0,
@@ -173,11 +253,13 @@ enum signature_types {
 	SIG_TYPE_MAX,
 };
 
-static void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *, void *);
-static void dump_pi_crc32(void *);
-static void set_sig_domain_t10dif_type1_2(struct mlx5dv_sig_block_domain *, void *);
-static void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *, void *);
-static void dump_pi_t10dif(void *);
+struct signature_ops {
+	const char *	name;
+	size_t		pi_size;
+	void		(*set_sig_domain)(struct mlx5dv_sig_block_domain *, void *);
+	void		(*dump_pi)(void *pi);
+	uint8_t		check_mask;
+};
 
 const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
 	[SIG_TYPE_CRC32] = {
@@ -215,25 +297,6 @@ const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
 				  MLX5DV_SIG_MASK_T10DIF_REFTAG,
 	},
 };
-
-struct config_t config = {
-	.port			= 19875,
-	.block_size		= 512,
-	.nb			= 8,
-	.interleave		= 0,
-	.sig			= &sig_ops[SIG_TYPE_CRC32],
-	.corrupt_data		= 0,
-	.corrupt_offset		= -1,
-	.corrupt_app_tag	= 0,
-	.corrupt_ref_tag	= 0,
-};
-
-static bool skip = false;
-
-static inline int is_client()
-{
-	return config.dst_addr.ss_family;
-}
 
 const struct signature_ops *parse_sig_type(const char *type)
 {
@@ -457,85 +520,11 @@ static int destroy_sig_mkey(struct mlx5dv_mkey **mkey)
 	return 0;
 }
 
-static void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *domain, void *sig)
-{
-	struct mlx5dv_sig_crc *crc = sig;
-
-	memset(domain, 0, sizeof(*domain));
-	memset(crc, 0, sizeof(*crc));
-
-	domain->sig_type = MLX5DV_SIG_TYPE_CRC;
-	domain->block_size = (config.block_size == 512) ?
-				     MLX5DV_BLOCK_SIZE_512 :
-				     MLX5DV_BLOCK_SIZE_4096;
-
-	crc->type = MLX5DV_SIG_CRC_TYPE_CRC32;
-	crc->seed = 0xffffffff;
-	domain->sig.crc = crc;
-}
-
-static void dump_pi_crc32(void *pi)
-{
-	uint32_t crc = ntohl(*(uint32_t *)pi);
-
-	info("crc32 0x%x\n", crc);
-}
-
-struct t10dif_pi {
-	uint16_t guard;
-	uint16_t app_tag;
-	uint32_t ref_tag;
-
-} __attribute__((packed));
-
-static void dump_pi_t10dif(void *pi_ptr)
-{
-	struct t10dif_pi *pi = pi_ptr;
-
-	info("t10dif { guard 0x%x, application tag 0x%x, reference tag 0x%x }\n",
-	     ntohs(pi->guard), ntohs(pi->app_tag), ntohl(pi->ref_tag));
-}
-
-static void set_sig_domain_t10dif_type1_2(struct mlx5dv_sig_block_domain *domain,
-					  void *sig)
-{
-	struct mlx5dv_sig_t10dif *dif = sig;
-
-	memset(dif, 0, sizeof(*dif));
-	dif->bg_type = MLX5DV_SIG_T10DIF_CRC;
-	dif->bg = 0xffff;
-	dif->app_tag = 0x5678;
-	dif->ref_tag = 0xabcdef90;
-	dif->flags = MLX5DV_SIG_T10DIF_FLAG_REF_REMAP |
-		     MLX5DV_SIG_T10DIF_FLAG_APP_ESCAPE;
-
-	memset(domain, 0, sizeof(*domain));
-	domain->sig.dif = dif;
-	domain->sig_type = MLX5DV_SIG_TYPE_T10DIF;
-	domain->block_size = (config.block_size == 512) ?
-				     MLX5DV_BLOCK_SIZE_512 :
-				     MLX5DV_BLOCK_SIZE_4096;
-}
-
-static void set_sig_domain_t10dif_type3(struct mlx5dv_sig_block_domain *domain,
-					void *sig)
-{
-	struct mlx5dv_sig_t10dif *dif = sig;
-
-	memset(dif, 0, sizeof(*dif));
-	dif->bg_type = MLX5DV_SIG_T10DIF_CRC;
-	dif->bg = 0xffff;
-	dif->app_tag = 0x5678;
-	dif->ref_tag = 0xabcdef90;
-	dif->flags = MLX5DV_SIG_T10DIF_FLAG_APP_REF_ESCAPE;
-
-	memset(domain, 0, sizeof(*domain));
-	domain->sig.dif = dif;
-	domain->sig_type = MLX5DV_SIG_TYPE_T10DIF;
-	domain->block_size = (config.block_size == 512) ?
-				     MLX5DV_BLOCK_SIZE_512 :
-				     MLX5DV_BLOCK_SIZE_4096;
-}
+enum sig_mode {
+	SIG_MODE_INSERT,
+	SIG_MODE_CHECK,
+	SIG_MODE_STRIP,
+};
 
 static int configure_sig_mkey(struct resources *res,
 			      enum sig_mode mode,
@@ -636,6 +625,46 @@ static int reg_sig_mkey(struct resources *res, enum sig_mode mode)
 	return 0;
 }
 
+static int check_sig_mkey(struct mlx5dv_mkey *mkey)
+{
+	struct mlx5dv_mkey_err err_info;
+	const char *sig_err_str = "";
+	int sig_err;
+	int rc;
+
+	rc = mlx5dv_mkey_check(mkey, &err_info);
+	if (rc) {
+		err("mlx5dv_mkey_check: %s\n", strerror(rc));
+		return -1;
+	}
+
+	sig_err = err_info.err_type;
+	switch (sig_err) {
+	case MLX5DV_MKEY_NO_ERR:
+		break;
+	case MLX5DV_MKEY_SIG_BLOCK_BAD_REFTAG:
+		sig_err_str = "REF_TAG";
+		break;
+	case MLX5DV_MKEY_SIG_BLOCK_BAD_APPTAG:
+		sig_err_str = "APP_TAG";
+		break;
+	case MLX5DV_MKEY_SIG_BLOCK_BAD_GUARD:
+		sig_err_str = "BLOCK_GUARD";
+		break;
+	default:
+		err("unknown sig error %d\n", sig_err);
+		break;
+	}
+
+	if (!sig_err)
+		info("SIG status: OK\n");
+	else
+		info("SIG ERROR: %s: expected 0x%lx, actual 0x%lx, offset %lu\n",
+		     sig_err_str, err_info.err.sig.expected_value,
+		     err_info.err.sig.actual_value, err_info.err.sig.offset);
+
+	return sig_err;
+}
 
 static int inv_sig_mkey(struct resources *res)
 {
@@ -929,47 +958,6 @@ err_exit:
 	return -1;
 }
 
-static int check_sig_mkey(struct mlx5dv_mkey *mkey)
-{
-	struct mlx5dv_mkey_err err_info;
-	const char *sig_err_str = "";
-	int sig_err;
-	int rc;
-
-	rc = mlx5dv_mkey_check(mkey, &err_info);
-	if (rc) {
-		err("mlx5dv_mkey_check: %s\n", strerror(rc));
-		return -1;
-	}
-
-	sig_err = err_info.err_type;
-	switch (sig_err) {
-	case MLX5DV_MKEY_NO_ERR:
-		break;
-	case MLX5DV_MKEY_SIG_BLOCK_BAD_REFTAG:
-		sig_err_str = "REF_TAG";
-		break;
-	case MLX5DV_MKEY_SIG_BLOCK_BAD_APPTAG:
-		sig_err_str = "APP_TAG";
-		break;
-	case MLX5DV_MKEY_SIG_BLOCK_BAD_GUARD:
-		sig_err_str = "BLOCK_GUARD";
-		break;
-	default:
-		err("unknown sig error %d\n", sig_err);
-		break;
-	}
-
-	if (!sig_err)
-		info("SIG status: OK\n");
-	else
-		info("SIG ERROR: %s: expected 0x%lx, actual 0x%lx, offset %lu\n",
-		     sig_err_str, err_info.err.sig.expected_value,
-		     err_info.err.sig.actual_value, err_info.err.sig.offset);
-
-	return sig_err;
-}
-
 static int send_repl(struct resources *res, uint8_t type, uint32_t status)
 {
 	struct msg_t *msg;
@@ -990,7 +978,6 @@ static int send_repl(struct resources *res, uint8_t type, uint32_t status)
 
 	return rc;
 }
-
 
 static int handle_write_req(struct resources *res,
 			    const struct msg_t *req)
@@ -1615,6 +1602,10 @@ int main(int argc, char *argv[])
 		err("too many arguments\n");
 		return -1;
 	}
+
+	/* Use CRC32 by default */
+	if (!config.sig)
+		config.sig = &sig_ops[SIG_TYPE_CRC32];
 
 	if ((config.corrupt_app_tag || config.corrupt_ref_tag) &&
 	    strcmp("t10dif-type1", config.sig->name) &&
