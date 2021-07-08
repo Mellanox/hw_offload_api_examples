@@ -227,9 +227,16 @@ static void set_sig_domain_crc32c(struct mlx5dv_sig_block_domain *domain, void *
 
 static void dump_pi_crc32(void *pi)
 {
-	uint32_t crc = ntohl(*(uint32_t *)pi);
+	uint8_t *crc = pi;
 
-	info("crc32 0x%x\n", crc);
+	info("CRC32: %02x %02x %02x %02x\n", crc[0], crc[1], crc[2], crc[3]);
+}
+
+static void dump_pi_crc32c(void *pi)
+{
+	uint8_t *crc = pi;
+
+	info("CRC32C: %02x %02x %02x %02x\n", crc[0], crc[1], crc[2], crc[3]);
 }
 
 static int is_crc32_supported(struct ibv_context *ctx)
@@ -335,7 +342,7 @@ const struct signature_ops sig_ops[SIG_TYPE_MAX] = {
 		.name		= "crc32c",
 		.pi_size	= 4,
 		.set_sig_domain	= set_sig_domain_crc32c,
-		.dump_pi	= dump_pi_crc32,
+		.dump_pi	= dump_pi_crc32c,
 		.check_mask	= MLX5DV_SIG_MASK_CRC32C,
 		.is_supported	= is_crc32c_supported,
 	},
