@@ -898,7 +898,7 @@ struct ibv_mr * alloc_mr(struct ibv_pd *pd, size_t size)
 		err("calloc: %s\n", strerror(errno));
 		return NULL;
 	}
-	memset(ptr, 1, size);
+	memset(ptr, 'a', size);
 
 	mr = ibv_reg_mr(pd, ptr, size, mr_flags);
 	if (!mr) {
