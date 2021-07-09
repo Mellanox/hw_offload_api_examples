@@ -196,8 +196,25 @@ static int is_sig_supported(struct ibv_context *ibv_ctx,
 	return 1;
 }
 
-static void _set_sig_domain_crc32(enum mlx5dv_sig_crc_type type,
-				  struct mlx5dv_sig_block_domain *domain,
+static void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *domain,
+				 void *sig)
+{
+	struct mlx5dv_sig_crc *crc = sig;
+
+	memset(domain, 0, sizeof(*domain));
+	memset(crc, 0, sizeof(*crc));
+
+	domain->sig_type = MLX5DV_SIG_TYPE_CRC;
+	domain->block_size = (config.block_size == 512) ?
+				     MLX5DV_BLOCK_SIZE_512 :
+				     MLX5DV_BLOCK_SIZE_4096;
+
+	crc->type = MLX5DV_SIG_CRC_TYPE_CRC32;
+	crc->seed = 0xffffffffU;
+	domain->sig.crc = crc;
+}
+
+static void set_sig_domain_crc32c(struct mlx5dv_sig_block_domain *domain,
 				  void *sig)
 {
 	struct mlx5dv_sig_crc *crc = sig;
@@ -210,19 +227,9 @@ static void _set_sig_domain_crc32(enum mlx5dv_sig_crc_type type,
 				     MLX5DV_BLOCK_SIZE_512 :
 				     MLX5DV_BLOCK_SIZE_4096;
 
-	crc->type = type;
-	crc->seed = 0xffffffff;
+	crc->type = MLX5DV_SIG_CRC_TYPE_CRC32C;
+	crc->seed = 0;
 	domain->sig.crc = crc;
-}
-
-static void set_sig_domain_crc32(struct mlx5dv_sig_block_domain *domain, void *sig)
-{
-	_set_sig_domain_crc32(MLX5DV_SIG_CRC_TYPE_CRC32, domain, sig);
-}
-
-static void set_sig_domain_crc32c(struct mlx5dv_sig_block_domain *domain, void *sig)
-{
-	_set_sig_domain_crc32(MLX5DV_SIG_CRC_TYPE_CRC32C, domain, sig);
 }
 
 static void dump_pi_crc32(void *pi)
