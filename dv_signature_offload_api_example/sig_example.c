@@ -236,7 +236,7 @@ static void dump_pi_crc32(void *pi)
 {
 	uint32_t crc = ntohl(*(uint32_t *)pi);
 
-	info("crc32 0x%x\n", crc);
+	info("CRC 0x%x\n", crc);
 }
 
 static int is_crc32_supported(struct ibv_context *ctx)
