@@ -1070,7 +1070,7 @@ static int client_send_req(struct resources *res,
 	}
 
 	ibv_wr_start(qpx);
-	qpx->wr_id = task->req_id;
+	qpx->wr_id = req_id;
 	qpx->wr_flags = IBV_SEND_SIGNALED;
 
 	ibv_wr_send(qpx);
