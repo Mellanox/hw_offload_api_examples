@@ -30,8 +30,9 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#define _BSD_SOURCE
+#define _DEFAULT_SOURCE
 #include <arpa/inet.h>
 #include <byteswap.h>
 #include <endian.h>
