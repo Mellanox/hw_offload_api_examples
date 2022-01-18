@@ -2,10 +2,6 @@
 
 This is a collection of HW offload examples targeting storage applications.
 
-## Signature API
-
-* signature_offload_api_example . Offloading T10-DIF and CRC32 calculation. Needs special MOFED build with user-space signature API.
-
 ## Erasure coding API
 
 Offloading block Reed-Solomon type erasure coding calculation.
