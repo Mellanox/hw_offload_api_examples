@@ -1,9 +1,3 @@
-[submodule "gf-complete"]
-	path = gf-complete
-	url = http://lab.jerasure.org/jerasure/gf-complete.git
-[submodule "jerasure"]
-	path = jerasure
-	url = http://lab.jerasure.org/jerasure/jerasure.git
 [submodule "crc32_offload_api_example"]
 	path = crc32_offload_api_example
 	url = https://github.com/Mellanox/crc32_offload_api_example.git
